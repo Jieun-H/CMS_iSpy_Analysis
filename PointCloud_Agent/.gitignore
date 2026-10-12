@@ -1,0 +1,14 @@
+# outputs and data never go into git
+output/
+PointCloud_Agent_output/
+*.ig
+*.npz
+*.root
+*.html
+
+# python / editors / Windows
+__pycache__/
+*.pyc
+*.swp
+*.swo
+*:Zone.Identifier

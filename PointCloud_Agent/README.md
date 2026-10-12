@@ -24,26 +24,68 @@ and results stay on lxplus (EOS).
 
 ## 1. One-time setup on lxplus (Run2 UL: CMSSW_10_6_30)
 
-The repository is cloned into the `src/` of the CMSSW release that matches the data:
+The setup follows the **Quick start** of the iSpy analyzers README
+(https://github.com/cms-outreach/ispy-analyzers/blob/cmssw10/README.md) step by step.
+Three things differ from it:
 
-```
-CMSSW_10_6_30/src/
-  ISpy/Analyzers                 ispy-analyzers, branch cmssw10   (cloned by the agent if missing)
-  ISpy/Services                  ispy-services, master            (cloned by the agent if missing)
-  CMS_iSpy_Analysis/PointCloud_Agent   this code
-```
+| ispy-analyzers README | Here | Why |
+|---|---|---|
+| `CMSSW_10_2_9` | **`CMSSW_10_6_30`** | The README says to match the CMSSW version used to (re)process the data and to substitute your own version; Run2 UL was processed with CMSSW_10_6_X. |
+| `git clone https://github.com/cms-outreach/ispy-analyzers.git ...` (no branch) | **`-b cmssw10`** | Without `-b` you get `master`, which has had no updates since 2022-03. |
+| run directly on lxplus | **`cmssw-el7` first** | The README predates el9 lxplus; CMSSW_10_6_30 is an el7 (slc7) release. Its "lxplus with Singularity" section is still "COMING SOON". |
 
 ```bash
 ssh <cern-user>@lxplus.cern.ch
-cmssw-el7                                    # CMSSW_10_6 is an el7 release; lxplus is el9
-cd /afs/cern.ch/work/${USER:0:1}/$USER       # or ~ ; AFS work has more quota
-export SCRAM_ARCH=slc7_amd64_gcc700
-cmsrel CMSSW_10_6_30
-cd CMSSW_10_6_30/src
-cmsenv
+cmssw-el7                                    # [added] enter the el7 container (lxplus is el9)
+cd /afs/cern.ch/work/${USER:0:1}/$USER       # install location (or ~ ; AFS work has more quota)
+export SCRAM_ARCH=slc7_amd64_gcc700          # [added] production architecture of CMSSW_10_6_30
+```
 
+Create a CMSSW environment:
+```bash
+cmsrel CMSSW_10_6_30
+```
+
+Change to the `CMSSW_10_6_30/src/` directory:
+```bash
+cd CMSSW_10_6_30/src/
+```
+
+Initialize the CMSSW environment:
+```bash
+cmsenv
+```
+
+Clone the necessary source code:
+```bash
+git clone -b cmssw10 https://github.com/cms-outreach/ispy-analyzers.git ISpy/Analyzers
+git clone https://github.com/cms-outreach/ispy-services.git ISpy/Services
+```
+
+Compile the code:
+```bash
+scram b
+```
+The build ends with `>> Package ISpy/Analyzers built` (verified with the CMSSW_10_6_30 image).
+
+Init your GRID proxy:
+```bash
+voms-proxy-init --rfc --voms cms
+```
+
+This is where the ispy-analyzers Quick start ends. Then, in the same `src/` directory, get this code and the one
+python package the HTML step needs:
+```bash
 git clone git@github.com:Jieun-H/CMS_iSpy_Analysis.git   # small repo: code only
-python3 -m pip install --user plotly         # numpy comes with CMSSW
+python3 -m pip install --user plotly                      # numpy comes with CMSSW
+```
+
+Resulting layout:
+```
+CMSSW_10_6_30/src/
+  ISpy/Analyzers                       ispy-analyzers, branch cmssw10
+  ISpy/Services                        ispy-services, master
+  CMS_iSpy_Analysis/PointCloud_Agent   this code
 ```
 
 - **Private repository?** First create an SSH key on lxplus (`ssh-keygen -t ed25519`) and add
@@ -61,20 +103,42 @@ ssh <cern-user>@lxplus.cern.ch
 cmssw-el7
 cd /afs/cern.ch/work/${USER:0:1}/$USER/CMSSW_10_6_30/src && cmsenv
 voms-proxy-init --rfc --voms cms --valid 168:00
-cd CMS_iSpy_Analysis && git pull && cd PointCloud_Agent
+cd CMS_iSpy_Analysis && git pull origin main && cd PointCloud_Agent
 ```
 
 ## 3. Run
+
+### (A) cmsRun only — make ig files by hand (recommended for the first test)
+
+This is the step the ispy-analyzers README does with `cmsRun python/ispy_10_X_X_cfg.py` after editing the input
+file in the cfg. Here the input and GlobalTag are passed as arguments instead of editing the cfg:
+
+```bash
+cd $CMSSW_BASE/src/CMS_iSpy_Analysis/PointCloud_Agent
+dasgoclient -query="file dataset=<dataset>" | head -1          # pick one input file
+cmsRun agent/cmssw/ispy_aod_cfg.py \
+    inputFiles=<the /store/... path from above> \
+    globalTag=<GlobalTag from the dataset name, e.g. 106X_upgrade2018_realistic_v11_L1v1> \
+    outputDir=$PWD/test_ig outputName=test maxEvents=10
+python3 agent/check_ig.py test_ig/test_0.ig                      # are tracks/rechits really in the ig?
+```
+
+As in the README, `test_0.ig` can be opened in the iSpy web display (http://cern.ch/ispy-webgl-dev).
+
+### (B) The agent — ig + HTML + point cloud
 
 ```bash
 python3 run_agent.py <dataset> --dry-run      # check the plan first
 python3 run_agent.py <dataset>
 ```
 
-- The agent uses the CMSSW area it lives in (`"cmssw_area_source": "enclosing"` in the plan). On the first run it
-  clones ISpy into `src/ISpy` and runs `scram b` (10–20 min); later runs only do a quick `scram b`.
+- The agent uses the CMSSW area it lives in (`"cmssw_area_source": "enclosing"` in the plan) and the ISpy code
+  cloned above; each run only does a quick `scram b`. If `ISpy/` is missing, the agent clones and builds it itself.
+- If `ISpy/Analyzers` was cloned without `-b cmssw10`, the agent stops with
+  `[!] ISpy/Analyzers is on branch 'master', expected 'cmssw10'`. Fix:
+  `rm -rf $CMSSW_BASE/src/ISpy/Analyzers`, clone again with `-b cmssw10`, then `scram b`.
 - The dataset must match the release: a Run3 dataset (`120X`) inside CMSSW_10_6_30 stops with a message.
-  For Run3, repeat section 1 with `cmssw-el7`, `SCRAM_ARCH=slc7_amd64_gcc900`, `cmsrel CMSSW_12_0_4`.
+  For Run3, repeat section 1 with `SCRAM_ARCH=slc7_amd64_gcc900`, `cmsrel CMSSW_12_0_4` and `-b cmssw12`.
 - Running from the plain el9 shell also works: the agent then wraps CMSSW commands in `cmssw-el7` itself
   (python3 + `pip install --user numpy plotly` on the host).
 

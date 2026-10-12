@@ -43,7 +43,7 @@ def to_url(f):
     """Prefix /store/... LFNs with the xrootd redirector; leave root:// and file: untouched."""
     f = f.strip()
     if f.startswith('/store/'):
-        return options.xrootdPrefix + '/' + f
+        return options.xrootdPrefix.rstrip('/') + '/' + f
     return f
 
 

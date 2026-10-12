@@ -7,36 +7,50 @@ Give it a CMS DAS dataset name; it produces, per event:
 3. a **point cloud (`.npz`)** to use as machine-learning input.
 
 ```
-/ZToMuMu_.../Run3Summer21DRPremix-120X_mcRun3_2021_realistic_v6-v2/AODSIM
-        │  DAS: release, files        (lxplus host)
+/DYJetsToLL_.../RunIISummer20UL18RECO-106X_upgrade2018_realistic_v11_L1v1-v2/AODSIM
+        │  DAS: release, files
         ▼
-  cmsRun + ISpy analyzers             (inside cmssw-el7 / el8 container)
+  cmsRun + ISpy analyzers  (CMSSW area this code lives in, e.g. CMSSW_10_6_30)
         ▼
   NAME_0.ig … NAME_N.ig  ──► check_ig (are tracks/rechits really there?)
         ▼
   per event:  pointcloud/Run_X/Event_Y.npz   visualize/Run_X/Event_Y.html
 ```
 
-Code is edited locally and pushed to GitHub; it is **run on lxplus**, and results stay on lxplus (EOS).
+Code is edited locally and pushed to GitHub; it is **run on lxplus** from inside a CMSSW area,
+and results stay on lxplus (EOS).
 
 ---
 
-## 1. One-time setup on lxplus
+## 1. One-time setup on lxplus (Run2 UL: CMSSW_10_6_30)
+
+The repository is cloned into the `src/` of the CMSSW release that matches the data:
+
+```
+CMSSW_10_6_30/src/
+  ISpy/Analyzers                 ispy-analyzers, branch cmssw10   (cloned by the agent if missing)
+  ISpy/Services                  ispy-services, master            (cloned by the agent if missing)
+  CMS_iSpy_Analysis/PointCloud_Agent   this code
+```
 
 ```bash
 ssh <cern-user>@lxplus.cern.ch
+cmssw-el7                                    # CMSSW_10_6 is an el7 release; lxplus is el9
+cd /afs/cern.ch/work/${USER:0:1}/$USER       # or ~ ; AFS work has more quota
+export SCRAM_ARCH=slc7_amd64_gcc700
+cmsrel CMSSW_10_6_30
+cd CMSSW_10_6_30/src
+cmsenv
 
-# a) get only this folder from the repository (sparse checkout)
-git clone --filter=blob:none --sparse git@github.com:Jieun-H/CMS_iSpy_Analysis.git
-cd CMS_iSpy_Analysis
-git sparse-checkout set PointCloud_Agent
-
-# b) python packages for the npz/html step (host python, not CMSSW's)
-python3 -m pip install --user numpy plotly
+git clone git@github.com:Jieun-H/CMS_iSpy_Analysis.git   # small repo: code only
+python3 -m pip install --user plotly         # numpy comes with CMSSW
 ```
 
 - **Private repository?** First create an SSH key on lxplus (`ssh-keygen -t ed25519`) and add
   `~/.ssh/id_ed25519.pub` to GitHub → Settings → SSH and GPG keys.
+- **Only `PointCloud_Agent/`?** A sparse checkout needs git ≥ 2.25, which the el7 container does not have.
+  Run it from the plain lxplus (el9) shell in the same `src/` directory instead:
+  `git clone --filter=blob:none --sparse git@github.com:Jieun-H/CMS_iSpy_Analysis.git && cd CMS_iSpy_Analysis && git sparse-checkout set PointCloud_Agent`
 - **Grid certificate**: `~/.globus/usercert.pem` and `userkey.pem` must exist and you must be in the CMS VO
   (https://twiki.cern.ch/twiki/bin/view/CMSPublic/WorkBookStartingGrid).
 
@@ -44,25 +58,25 @@ python3 -m pip install --user numpy plotly
 
 ```bash
 ssh <cern-user>@lxplus.cern.ch
-cd ~/CMS_iSpy_Analysis && git pull          # get the latest code
+cmssw-el7
+cd /afs/cern.ch/work/${USER:0:1}/$USER/CMSSW_10_6_30/src && cmsenv
 voms-proxy-init --rfc --voms cms --valid 168:00
-cd PointCloud_Agent
+cd CMS_iSpy_Analysis && git pull && cd PointCloud_Agent
 ```
-
-Run the agent from the **plain lxplus shell** — do not enter `cmssw-el7` yourself; the agent does it.
 
 ## 3. Run
 
 ```bash
-python3 run_agent.py /ZToMuMu_M-120To200_TuneCP5_14TeV-powheg-pythia8/Run3Summer21DRPremix-120X_mcRun3_2021_realistic_v6-v2/AODSIM
+python3 run_agent.py <dataset> --dry-run      # check the plan first
+python3 run_agent.py <dataset>
 ```
 
-Check what it will do first:
-```bash
-python3 run_agent.py <dataset> --dry-run
-```
-
-The first run for an era builds CMSSW + ISpy (10–20 min); later runs reuse it.
+- The agent uses the CMSSW area it lives in (`"cmssw_area_source": "enclosing"` in the plan). On the first run it
+  clones ISpy into `src/ISpy` and runs `scram b` (10–20 min); later runs only do a quick `scram b`.
+- The dataset must match the release: a Run3 dataset (`120X`) inside CMSSW_10_6_30 stops with a message.
+  For Run3, repeat section 1 with `cmssw-el7`, `SCRAM_ARCH=slc7_amd64_gcc900`, `cmsrel CMSSW_12_0_4`.
+- Running from the plain el9 shell also works: the agent then wraps CMSSW commands in `cmssw-el7` itself
+  (python3 + `pip install --user numpy plotly` on the host).
 
 ### Options
 
@@ -74,7 +88,7 @@ The first run for an era builds CMSSW + ISpy (10–20 min); later runs reuse it.
 | `--files LFN ...` | – | use these files instead of the DAS list |
 | `--name NAME` | `<primary>__<campaign>` | output folder / ig prefix |
 | `--out DIR` | `/eos/user/<u>/<user>/PointCloud_Agent_output` | output base directory |
-| `--cmssw-base DIR` | `/afs/cern.ch/work/<u>/<user>/pca_cmssw` | where CMSSW areas are created |
+| `--cmssw-base DIR` | the CMSSW area this code is in | let the agent create/use `DIR/<release>` instead |
 | `--globaltag GT` | from dataset name (MC) / era default (data) | override the GlobalTag |
 | `--release CMSSW_X_Y_Z` | from DAS | override the release used to choose the era |
 | `--no-pt-cut` | off | keep low-pT objects (ISpy default cuts: tracks 1 GeV, global muons 2 GeV) |

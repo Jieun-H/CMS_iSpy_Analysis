@@ -7,23 +7,28 @@ iSpy should run in a release as close as possible to that one
 """
 
 import re
-from dataclasses import dataclass, field
 from typing import List, Optional
 
 
-@dataclass(frozen=True)
-class Era:
-    key: str
-    description: str
-    release_prefixes: tuple      # DAS release prefixes handled by this era, e.g. ("CMSSW_10_6_",)
-    cmssw: str                   # release we cmsrel
-    scram_arch: str
-    container: Optional[str]     # cmssw-elN wrapper on lxplus9, None = run on the host
-    ispy_branch: str             # cms-outreach/ispy-analyzers
-    services_branch: str         # cms-outreach/ispy-services
-    data_globaltag: str          # default GlobalTag for collision data
-    validated: bool              # False = config exists but was never run end-to-end
-    notes: str = ""
+class Era(object):
+    """Plain class (no dataclasses): must run on python3.6 inside CMSSW_10_6 / el7."""
+
+    def __init__(self, key, description, release_prefixes, cmssw, scram_arch, container,
+                 ispy_branch, services_branch, data_globaltag, validated, notes=""):
+        self.key = key
+        self.description = description
+        self.release_prefixes = release_prefixes  # DAS releases handled, e.g. ("CMSSW_10_6_",)
+        self.cmssw = cmssw                        # release to cmsrel
+        self.scram_arch = scram_arch
+        self.container = container                # cmssw-elN wrapper on lxplus9, None = el9 host
+        self.ispy_branch = ispy_branch            # cms-outreach/ispy-analyzers
+        self.services_branch = services_branch    # cms-outreach/ispy-services
+        self.data_globaltag = data_globaltag      # default GlobalTag for collision data
+        self.validated = validated                # False = never run end-to-end
+        self.notes = notes
+
+    def matches(self, release):
+        return any(release.startswith(p) for p in self.release_prefixes)
 
 
 ERAS: List[Era] = [
@@ -97,7 +102,7 @@ def release_from_name(dataset: str) -> Optional[str]:
 
 def era_for_release(release: str) -> Era:
     for era in ERAS:
-        if any(release.startswith(p) for p in era.release_prefixes):
+        if era.matches(release):
             return era
     known = ", ".join(p for e in ERAS for p in e.release_prefixes)
     raise ValueError(f"No era configured for {release} (known: {known}). "
@@ -109,3 +114,11 @@ def default_name(dataset: str) -> str:
     p = parse_dataset(dataset)
     campaign = p["processed"].split("-")[0]
     return re.sub(r"[^A-Za-z0-9_.-]", "_", f"{p['primary']}__{campaign}")
+
+
+# SCRAM_ARCH prefix -> OS major version it needs (cmssw-elN on lxplus9)
+_ARCH_OS = {"slc6": 6, "slc7": 7, "cc8": 8, "el8": 8, "el9": 9, "el10": 10}
+
+
+def arch_os(scram_arch: str) -> Optional[int]:
+    return _ARCH_OS.get(scram_arch.split("_")[0])

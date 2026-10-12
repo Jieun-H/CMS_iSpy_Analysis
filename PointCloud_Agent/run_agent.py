@@ -2,7 +2,9 @@
 """
 PointCloud_Agent: CMS AOD/AODSIM dataset -> iSpy ig -> point cloud (npz) + visualization (html).
 
-Run on lxplus (el9 host shell, NOT inside cmssw-elN — the agent enters the right container itself):
+Run on lxplus, normally from inside the CMSSW area it lives in (CMSSW_X/src/CMS_iSpy_Analysis/PointCloud_Agent),
+either inside the matching cmssw-elN container or from the el9 host shell (the agent then wraps CMSSW
+commands in cmssw-elN itself):
 
   python3 run_agent.py /ZToMuMu_M-120To200_TuneCP5_14TeV-powheg-pythia8/Run3Summer21DRPremix-120X_mcRun3_2021_realistic_v6-v2/AODSIM
 
@@ -92,13 +94,50 @@ def capture(cmd):
     return [l.strip() for l in res.stdout.splitlines() if l.strip()]
 
 
-def in_era(era, cmd):
-    """Wrap a command so it runs in the era's OS container (cmssw-elN -- ...)."""
-    if not era.container:
+def find_cmssw_area(start):
+    """CMSSW area containing `start` (a directory with .SCRAM/<arch>), or None."""
+    d = os.path.abspath(start)
+    while d != os.path.dirname(d):
+        scram = os.path.join(d, ".SCRAM")
+        if os.path.isdir(scram) and os.path.basename(d).startswith("CMSSW_"):
+            archs = [a for a in os.listdir(scram) if os.path.isdir(os.path.join(scram, a))
+                     and eras.arch_os(a) is not None]
+            return {"path": d, "release": os.path.basename(d), "arch": archs[0] if archs else None}
+        d = os.path.dirname(d)
+    return None
+
+
+def host_os():
+    """Major RHEL-family version of the OS we are running on (inside a container: the container's)."""
+    try:
+        with open("/etc/os-release") as f:
+            for line in f:
+                if line.startswith("VERSION_ID="):
+                    return int(line.split("=", 1)[1].strip().strip('"').split(".")[0])
+    except (OSError, ValueError):
+        pass
+    try:
+        with open("/etc/redhat-release") as f:
+            for tok in f.read().split():
+                if tok[0].isdigit():
+                    return int(tok.split(".")[0])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def in_os(scram_arch, cmd):
+    """Run cmd directly if we are already on the OS the arch needs, else via cmssw-elN."""
+    need, have = eras.arch_os(scram_arch), host_os()
+    if need is None or need == have:
         return cmd
-    wrapper = shutil.which(era.container) or f"/cvmfs/cms.cern.ch/common/{era.container}"
+    if os.environ.get("APPTAINER_CONTAINER") or os.environ.get("SINGULARITY_CONTAINER"):
+        raise AgentError(f"{scram_arch} needs el{need} but this shell is an el{have} container. "
+                         f"Exit it and run 'cmssw-el{need}' (or run from the plain lxplus shell).")
+    name = f"cmssw-el{need}"
+    wrapper = shutil.which(name) or f"/cvmfs/cms.cern.ch/common/{name}"
     if not os.path.exists(wrapper):
-        raise AgentError(f"{era.container} not found — is this lxplus with /cvmfs/cms.cern.ch?")
+        raise AgentError(f"{name} not found — is this lxplus with /cvmfs/cms.cern.ch?")
     return [wrapper, "--"] + cmd
 
 
@@ -143,10 +182,26 @@ def make_plan(args):
     if not gt:
         raise AgentError("Could not determine the GlobalTag; pass --globaltag")
 
+    # Which CMSSW area: the one this code lives in (CMSSW_X/src/...), unless --cmssw-base is given
+    enclosing = None if args.cmssw_base else find_cmssw_area(HERE)
+    if enclosing:
+        if not era.matches(enclosing["release"]):
+            raise AgentError(
+                f"This code is inside {enclosing['release']}, but the dataset was produced with {release} "
+                f"(era '{era.key}' needs {' / '.join(p + 'X' for p in era.release_prefixes)}, "
+                f"e.g. {era.cmssw}).\n"
+                f"  Set up {era.cmssw} (SCRAM_ARCH={era.scram_arch}) and clone the repository into its src/, "
+                f"or pass --cmssw-base DIR to let the agent create one.")
+        area, cmssw, arch = enclosing["path"], enclosing["release"], enclosing["arch"] or era.scram_arch
+    else:
+        base = os.path.abspath(args.cmssw_base or cmssw_default_dir())
+        area, cmssw, arch = os.path.join(base, era.cmssw), era.cmssw, era.scram_arch
+
     plan.update({
-        "das_release": release, "era": era.key, "cmssw": era.cmssw, "scram_arch": era.scram_arch,
-        "container": era.container, "ispy_branch": era.ispy_branch,
-        "services_branch": era.services_branch, "globaltag": gt, "era_validated": era.validated,
+        "das_release": release, "era": era.key, "cmssw": cmssw, "scram_arch": arch,
+        "cmssw_area": area, "cmssw_area_source": "enclosing" if enclosing else "agent",
+        "ispy_branch": era.ispy_branch, "services_branch": era.services_branch,
+        "globaltag": gt, "era_validated": era.validated,
     })
     return plan
 
@@ -156,25 +211,30 @@ def make_plan(args):
 # ════════════════════════════════════════════════════════
 
 def step_ig(args, plan, out):
-    if os.environ.get("APPTAINER_CONTAINER") or os.environ.get("SINGULARITY_CONTAINER"):
-        raise AgentError("Run the agent from the plain lxplus shell, not inside cmssw-elN.")
     era = eras.era_for_release(plan["das_release"])
     if not era.validated:
         log(f"NOTE: era '{era.key}' has not been validated end-to-end yet. {era.notes}")
 
-    if subprocess.run(["voms-proxy-info", "--exists", "--valid", "0:30"],
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+    try:
+        proxy_ok = subprocess.run(["voms-proxy-info", "--exists", "--valid", "0:30"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    except FileNotFoundError:
+        proxy_ok = True   # no voms client in this shell; xrootd will complain if the proxy is missing
+        log("WARNING: voms-proxy-info not found, cannot check the grid proxy")
+    if not proxy_ok:
         raise AgentError("No valid grid proxy (or <30 min left). Run:\n"
                          "  voms-proxy-init --rfc --voms cms --valid 168:00")
 
     logs = os.path.join(out, "logs")
-    base = os.path.abspath(args.cmssw_base)
-    area = os.path.join(base, era.cmssw)
+    area, arch = plan["cmssw_area"], plan["scram_arch"]
 
-    # 1. CMSSW area + ISpy build (first run per era takes 10-20 min)
-    log(f"CMSSW area: {area}  (ISpy {era.ispy_branch})")
-    run(in_era(era, ["bash", os.path.join(CMSSW_DIR, "setup_cmssw.sh"), base, era.cmssw,
-                     era.scram_arch, era.ispy_branch, era.services_branch]),
+    def in_era(cmd):
+        return in_os(arch, cmd)
+
+    # 1. CMSSW area + ISpy build (first run per era takes 10-20 min; later only a quick scram b)
+    log(f"CMSSW area: {area}  ({plan['cmssw_area_source']}, ISpy {era.ispy_branch})")
+    run(in_era(["bash", os.path.join(CMSSW_DIR, "setup_cmssw.sh"), os.path.dirname(area),
+                os.path.basename(area), arch, era.ispy_branch, era.services_branch]),
         log_path=os.path.join(logs, "setup_cmssw.log"))
 
     # 2. input files
@@ -200,7 +260,7 @@ def step_ig(args, plan, out):
 
     # 3. does the first file have what we need?
     if not args.skip_content_check:
-        code, _ = run(in_era(era, ["bash", os.path.join(CMSSW_DIR, "check_content.sh"), area,
+        code, _ = run(in_era(["bash", os.path.join(CMSSW_DIR, "check_content.sh"), area,
                                    url(files[0]), os.path.join(logs, "eventcontent.txt")]),
                       check=False)
         if code == 3:
@@ -216,7 +276,7 @@ def step_ig(args, plan, out):
                 f"maxEvents={args.nevents}", f"eventsPerIg={args.per_ig}"]
     if args.no_pt_cut:
         cms_args += ["trackPtMin=0", "muonPtMin=0"]
-    run(in_era(era, ["bash", os.path.join(CMSSW_DIR, "run_cmsrun.sh"), area,
+    run(in_era(["bash", os.path.join(CMSSW_DIR, "run_cmsrun.sh"), area,
                      os.path.join(CMSSW_DIR, "ispy_aod_cfg.py")] + cms_args),
         log_path=os.path.join(logs, "cmsRun.log"))
 
@@ -311,8 +371,9 @@ def parse_args(argv):
     p.add_argument("--name", help="Output name (default: <primary>__<campaign>)")
     p.add_argument("--out", default=user_default_dir("PointCloud_Agent_output", "PointCloud_Agent_output"),
                    help="Output base directory (default: EOS user area on lxplus, else ~)")
-    p.add_argument("--cmssw-base", default=cmssw_default_dir(),
-                   help="Where CMSSW areas are created (default: AFS work area on lxplus, else ~)")
+    p.add_argument("--cmssw-base",
+                   help="Create/use CMSSW areas under this directory instead of the CMSSW area this code "
+                        "lives in (default when not inside one: AFS work area on lxplus, else ~/pca_cmssw)")
     p.add_argument("--nevents", type=int, default=100, help="Events to process (default 100, -1 = all)")
     p.add_argument("--per-ig", type=int, default=10, help="Events per ig file (default 10)")
     p.add_argument("--nfiles", type=int, default=1, help="Input files from DAS to use (default 1)")

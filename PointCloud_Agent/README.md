@@ -150,7 +150,7 @@ python3 run_agent.py <dataset>
 | `--per-ig N` | 10 | events per ig file |
 | `--nfiles N` | 1 | how many files of the DAS file list to read |
 | `--first-file K` | 0 | skip the first K files of the DAS list (next batch of a dataset; give it a new `--name`) |
-| `--no-html` | off | skip the per-event HTML pages (large productions for training) |
+| `--html` / `--no-html` | `--html` | write / skip the per-event HTML pages (`--no-html` for large productions for training) |
 | `--files LFN ...` | – | use these files instead of the DAS list |
 | `--name NAME` | `<primary>__<campaign>` | output folder / ig prefix |
 | `--out DIR` | `/eos/user/<u>/<user>/PointCloud_Agent_output` | output base directory |

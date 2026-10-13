@@ -394,7 +394,8 @@ def parse_args(argv):
     p.add_argument("--nfiles", type=int, default=1, help="Input files from DAS to use (default 1)")
     p.add_argument("--first-file", type=int, default=0,
                    help="Skip this many files of the DAS list (next batch of a dataset; use a new --name)")
-    p.add_argument("--no-html", action="store_true", help="Do not write the per-event HTML pages")
+    p.add_argument("--html", action=argparse.BooleanOptionalAction, default=True,
+                   help="Write the per-event HTML pages (default); --no-html skips them")
     p.add_argument("--files", nargs="+", help="Explicit input LFNs/URLs instead of the DAS file list")
     p.add_argument("--globaltag", help="Override the GlobalTag")
     p.add_argument("--release", help="Override the DAS release used to pick the era, e.g. CMSSW_12_0_2")
@@ -442,7 +443,7 @@ def main(argv=None):
         summary = []
         if "pointcloud" in steps:
             subtitle = args.dataset or ", ".join(os.path.basename(p) for p in args.ig)
-            summary = step_pointcloud(out, igs, subtitle, html=not args.no_html)
+            summary = step_pointcloud(out, igs, subtitle, html=args.html)
 
         manifest = {
             "created": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -452,7 +453,7 @@ def main(argv=None):
             "plan": plan,
             "options": {"nevents": args.nevents, "per_ig": args.per_ig, "nfiles": args.nfiles,
                         "first_file": args.first_file, "no_pt_cut": args.no_pt_cut,
-                        "html": not args.no_html},
+                        "html": args.html},
             "events": summary,
         }
         with open(os.path.join(out, "logs", "manifest.json"), "w") as f:

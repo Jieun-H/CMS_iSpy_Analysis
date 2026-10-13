@@ -6,8 +6,10 @@ ig/ig_and_pointcloud/DoubleElectron_Run2012C_0/code/generate_pointcloud_260911.p
   - tracks / GSF electrons / tracker & standalone muons: cubic Bezier from Extras_V1 (33 points),
     same construction as iSpy (ispy-webgl/js/objects-draw.js)
   - global muons: Points_V1 associated through MuonGlobalPoints_V1
-  - ECAL EB/EE: intersection of the front-face diagonals; HCAL HB: box centre
+  - ECAL EB/EE: intersection of the front-face diagonals; HCAL HB/HE/HF/HO: box centre
   - muon chambers: box centre
+  - CSC / DT segments: both end points (iSpy draws the line pos_1 -> pos_2)
+  - RPC rechits: centre of the u/v/w cross (iSpy draws three lines through it)
 Changes:
   - fields are looked up by name from the ig "Types" block (robust across ISpy versions)
   - missing collections/associations give empty arrays instead of KeyError
@@ -24,12 +26,17 @@ import numpy as np
 MIN_E_EB = 0.25
 MIN_E_EE = 0.5
 MIN_E_HB = 0.0
+MIN_E_HE = MIN_E_HF = MIN_E_HO = 0.0   # no iSpy-matched cut; keep every hit with E > 0
 
 BEZIER_POINTS = 32   # -> 33 points per track
 
 # Fallback field positions when an event has no "Types" entry for a collection
 _DEFAULT_FIELDS = {
     "Tracks_V3": ["pos", "dir", "pt", "phi", "eta", "charge", "chi2", "ndof"],
+    "CSCSegments_V2": ["detid", "pos_1", "pos_2", "endcap", "station", "ring", "chamber", "layer"],
+    "DTRecSegment4D_V1": ["detid", "pos_1", "pos_2", "sectorId", "stationId", "wheelId"],
+    "RPCRecHits_V1": ["u1", "u2", "v1", "v2", "w1", "w2", "region", "station", "sector", "layer",
+                      "subsector", "roll", "detid"],
     "Extras_V1": ["pos_1", "dir_1", "pos_2", "dir_2"],
     "GsfElectrons_V2": ["pt", "eta", "phi", "charge", "pos", "dir"],
     "TrackerMuons_V2": ["pt", "charge", "pos", "phi", "eta"],
@@ -58,6 +65,16 @@ COLUMNS = OrderedDict([
     ("ecal_eb",            ["x", "y", "z", "energy", "eta", "phi", "time", "detid"]),
     ("ecal_ee",            ["x", "y", "z", "energy", "eta", "phi", "time", "detid"]),
     ("hcal_hb",            ["x", "y", "z", "energy", "eta", "phi", "time", "detid"]),
+    ("hcal_he",            ["x", "y", "z", "energy", "eta", "phi", "time", "detid"]),
+    ("hcal_hf",            ["x", "y", "z", "energy", "eta", "phi", "time", "detid"]),
+    ("hcal_ho",            ["x", "y", "z", "energy", "eta", "phi", "time", "detid"]),
+    # one row per track, row i <-> track_id i of "tracks"
+    ("track_info",         ["pt", "eta", "phi", "charge", "chi2", "ndof", "track_id"]),
+    ("csc_segments",       ["x1", "y1", "z1", "x2", "y2", "z2",
+                            "endcap", "station", "ring", "chamber", "detid"]),
+    ("dt_segments",        ["x1", "y1", "z1", "x2", "y2", "z2",
+                            "wheel", "station", "sector", "detid"]),
+    ("rpc_hits",           ["x", "y", "z", "region", "station", "sector", "layer", "detid"]),
 ])
 
 
@@ -78,6 +95,13 @@ def load_ig(path):
 
 def _collection(data, name):
     return data.get("Collections", {}).get(name, []) or []
+
+
+def _versioned(data, base):
+    """Newest '<base>_V<n>' collection in the event (versions differ between ISpy branches)."""
+    present = set(data.get("Types", {})) | set(data.get("Collections", {}))
+    names = [n for n in present if re.fullmatch(re.escape(base) + r"_V\d+", n)]
+    return max(names, key=lambda n: int(n.rsplit("_V", 1)[1])) if names else base + "_V1"
 
 
 def _assoc(data, name):
@@ -191,6 +215,19 @@ def tracks(data):
     return _bezier_objects(data, "Tracks_V3", "TrackExtras_V1", "tracks")
 
 
+def track_info(data):
+    """Tracks_V3 per-track quantities, in the same order (track_id) as tracks() -> (T, 7)"""
+    objs = _collection(data, "Tracks_V3")
+    assoc = _assoc(data, "TrackExtras_V1")
+    if not objs or not assoc or not _collection(data, "Extras_V1"):
+        return _empty("track_info")
+    f = _fields(data, "Tracks_V3")
+    cols = COLUMNS["track_info"][:-1]
+    out = [[objs[a[0][1]][f[c]] if c in f else np.nan for c in cols] + [obj_id]
+           for obj_id, a in enumerate(assoc)]
+    return np.array(out, dtype=np.float64)
+
+
 def electron_tracks(data):
     return _bezier_objects(data, "GsfElectrons_V2", "GsfElectronExtras_V1", "elec_tracks")
 
@@ -290,6 +327,52 @@ def hcal_hb(data):
     return _rechits(data, "HBRecHits_V2", MIN_E_HB, False, "hcal_hb")
 
 
+def hcal_he(data):
+    return _rechits(data, "HERecHits_V2", MIN_E_HE, False, "hcal_he")
+
+
+def hcal_hf(data):
+    return _rechits(data, "HFRecHits_V2", MIN_E_HF, False, "hcal_hf")
+
+
+def hcal_ho(data):
+    return _rechits(data, "HORecHits_V2", MIN_E_HO, False, "hcal_ho")
+
+
+def _segments(data, base, id_fields, key):
+    """Muon segments -> (N, 6 + len(id_fields) + 1) [x1,y1,z1,x2,y2,z2, ids..., detid]"""
+    name = _versioned(data, base)
+    rows = _collection(data, name)
+    if not rows:
+        return _empty(key)
+    f = _fields(data, name)
+    out = [list(r[f["pos_1"]]) + list(r[f["pos_2"]])
+           + [r[f[i]] if i in f else -1 for i in id_fields] + [r[f["detid"]]] for r in rows]
+    return np.array(out, dtype=np.float64)
+
+
+def csc_segments(data):
+    return _segments(data, "CSCSegments", ("endcap", "station", "ring", "chamber"), "csc_segments")
+
+
+def dt_segments(data):
+    return _segments(data, "DTRecSegment4D", ("wheelId", "stationId", "sectorId"), "dt_segments")
+
+
+def rpc_hits(data):
+    """RPCRecHits -> (N, 8) [x,y,z, region,station,sector,layer, detid]; x,y,z = centre of the cross"""
+    name = _versioned(data, "RPCRecHits")
+    rows = _collection(data, name)
+    if not rows:
+        return _empty("rpc_hits")
+    f = _fields(data, name)
+    ends = [f[k] for k in ("u1", "u2", "v1", "v2", "w1", "w2")]
+    ids = ("region", "station", "sector", "layer")
+    out = [list(np.mean([r[i] for i in ends], axis=0))
+           + [r[f[i]] if i in f else -1 for i in ids] + [r[f["detid"]]] for r in rows]
+    return np.array(out, dtype=np.float64)
+
+
 _EXTRACTORS = OrderedDict([
     ("tracks", tracks),
     ("elec_tracks", electron_tracks),
@@ -302,6 +385,13 @@ _EXTRACTORS = OrderedDict([
     ("ecal_eb", ecal_eb),
     ("ecal_ee", ecal_ee),
     ("hcal_hb", hcal_hb),
+    ("hcal_he", hcal_he),
+    ("hcal_hf", hcal_hf),
+    ("hcal_ho", hcal_ho),
+    ("track_info", track_info),
+    ("csc_segments", csc_segments),
+    ("dt_segments", dt_segments),
+    ("rpc_hits", rpc_hits),
 ])
 
 

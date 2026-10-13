@@ -196,7 +196,11 @@ d["tracks_columns"]     # column names of the array above
 | `vertices` | x, y, z | `PrimaryVertices_V1` (Run2/3) or `Vertices_V1` (Run1) |
 | `secondary_vertices` | x, y, z | `SecondaryVertices_V1` (Run2/3 only) |
 | `ecal_eb`, `ecal_ee` | x, y, z, energy, eta, phi, time, detid | front-face diagonal intersection; E > 0.25 / 0.5 GeV |
-| `hcal_hb` | x, y, z, energy, eta, phi, time, detid | box centre; E > 0 |
+| `hcal_hb`, `hcal_he`, `hcal_hf`, `hcal_ho` | x, y, z, energy, eta, phi, time, detid | box centre (8 corners); E > 0 |
+| `track_info` | pt, eta, phi, charge, chi2, ndof, track_id | `Tracks_V3`, one row per track; row *i* = `track_id` *i* of `tracks` |
+| `csc_segments` | x1, y1, z1, x2, y2, z2, endcap, station, ring, chamber, detid | `CSCSegments_V*`, both end points (`pos_1`, `pos_2`) |
+| `dt_segments` | x1, y1, z1, x2, y2, z2, wheel, station, sector, detid | `DTRecSegment4D_V*`, both end points |
+| `rpc_hits` | x, y, z, region, station, sector, layer, detid | `RPCRecHits_V*`, centre of the u/v/w cross |
 
 Coordinates are in metres (iSpy convention). The arrays are identical to those of
 `generate_pointcloud_260911.py` (checked on all 25 events of `DoubleElectron_Run2012C_0.ig`);

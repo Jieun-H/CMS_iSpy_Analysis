@@ -4,9 +4,12 @@ Point-cloud npz (agent/pointcloud.py) -> model inputs, track by track.
 track_id / muon_id are only list positions inside one ig collection. They are used here
 to group the 33 Bezier points of each track and are then dropped, and the track order
 in each event is shuffled, so neither the id nor a track's position in the array tells
-the model anything. Same for ECAL hits (detid is dropped, hit order is shuffled).
+the model anything. Same for ECAL hits, muon segments and RPC hits (detid and the
+chamber numbers are dropped, the order is shuffled).
 
-Inputs   all tracks (tracks key: trackExtrapolator, pT > 1 GeV) + ECAL EB/EE hits.
+Inputs   all tracks (tracks key: trackExtrapolator, pT > 1 GeV) + ECAL EB/EE hits
+         + CSC/DT segments + RPC hits. Segments and RPC hits are local measurements in
+         the muon system, made before (and independent of) muon reconstruction.
          Reconstructed physics objects (elec_tracks, muon_tracks, global_muon,
          standalone_muon) and muon_chambers (only chambers matched to a reco muon)
          are never inputs: they are the answer.
@@ -16,6 +19,8 @@ Label    has_muon: at least one global muon above pt_min, taken from global_muon
     batch = collate([ds[i] for i in range(8)])
     batch["track_points"]   # (B, T, 33, 3)  x,y,z along each track, inner -> outer
     batch["track_mask"]     # (B, T) True where a real track is
+    batch["seg_feats"]      # (B, S, 6)  segment end points x1,y1,z1,x2,y2,z2; seg_det 0=CSC 1=DT
+    batch["rpc_feats"]      # (B, R, 3)  RPC hit x,y,z
 """
 import numpy as np
 
@@ -23,6 +28,9 @@ TRACK_POINT_FEATURES = ("x", "y", "z")                  # per point, in Bezier o
 TRACK_FEATURES = ("pt",)                                # per track
 HIT_FEATURES = ("x", "y", "z", "energy", "time")       # per ECAL hit (eta, phi follow from x, y, z)
 HIT_KEYS = ("ecal_eb", "ecal_ee")                       # hit_det = position in this tuple
+SEG_FEATURES = ("x1", "y1", "z1", "x2", "y2", "z2")     # per segment
+SEG_KEYS = ("csc_segments", "dt_segments")              # seg_det = position in this tuple
+RPC_FEATURES = ("x", "y", "z")                          # per RPC hit
 POINTS_PER_TRACK = 33
 
 _DEFAULT_COLUMNS = {
@@ -30,6 +38,9 @@ _DEFAULT_COLUMNS = {
     "global_muon": ["x", "y", "z", "pt", "muon_id"],
     "ecal_eb": ["x", "y", "z", "energy", "eta", "phi", "time", "detid"],
     "ecal_ee": ["x", "y", "z", "energy", "eta", "phi", "time", "detid"],
+    "csc_segments": ["x1", "y1", "z1", "x2", "y2", "z2", "endcap", "station", "ring", "chamber", "detid"],
+    "dt_segments": ["x1", "y1", "z1", "x2", "y2", "z2", "wheel", "station", "sector", "detid"],
+    "rpc_hits": ["x", "y", "z", "region", "station", "sector", "layer", "detid"],
 }
 
 
@@ -70,14 +81,29 @@ def tracks(npz):
     return points, feats
 
 
-def hits(npz):
-    """-> features (H, len(HIT_FEATURES)) float32, detector (H,) int64 (index into HIT_KEYS)"""
+def _stack(npz, keys, features):
+    """Rows of several keys, selected columns -> float32 (N, F), source index (N,) int64."""
     feats, det = [], []
-    for d, key in enumerate(HIT_KEYS):
+    for d, key in enumerate(keys):
         arr, c = _array(npz, key)
-        feats.append(arr[:, [c[f] for f in HIT_FEATURES]].astype(np.float32))
+        feats.append(arr[:, [c[f] for f in features]].astype(np.float32))
         det.append(np.full(len(arr), d, dtype=np.int64))
     return np.concatenate(feats), np.concatenate(det)
+
+
+def hits(npz):
+    """-> features (H, len(HIT_FEATURES)) float32, detector (H,) int64 (index into HIT_KEYS)"""
+    return _stack(npz, HIT_KEYS, HIT_FEATURES)
+
+
+def segments(npz):
+    """-> end points (S, 6) float32, detector (S,) int64 (index into SEG_KEYS)"""
+    return _stack(npz, SEG_KEYS, SEG_FEATURES)
+
+
+def rpc_hits(npz):
+    """-> (R, 3) float32"""
+    return _stack(npz, ("rpc_hits",), RPC_FEATURES)[0]
 
 
 def muons(npz, pt_min):
@@ -92,6 +118,8 @@ def event(path, rng=None, pt_min=10.0):
     with np.load(path) as npz:
         track_points, track_feats = tracks(npz)
         hit_feats, hit_det = hits(npz)
+        seg_feats, seg_det = segments(npz)
+        rpc_feats = rpc_hits(npz)
         muon_pt = muons(npz, pt_min)
         ident = tuple(int(npz[k][0]) for k in ("run", "lumi", "event") if k in npz.files)
     if rng is not None:
@@ -99,9 +127,13 @@ def event(path, rng=None, pt_min=10.0):
         track_points, track_feats = track_points[t], track_feats[t]
         h = rng.permutation(len(hit_feats))
         hit_feats, hit_det = hit_feats[h], hit_det[h]
+        g = rng.permutation(len(seg_feats))
+        seg_feats, seg_det = seg_feats[g], seg_det[g]
+        rpc_feats = rpc_feats[rng.permutation(len(rpc_feats))]
     return {
         "track_points": track_points, "track_feats": track_feats,
         "hit_feats": hit_feats, "hit_det": hit_det,
+        "seg_feats": seg_feats, "seg_det": seg_det, "rpc_feats": rpc_feats,
         "has_muon": np.int64(len(muon_pt) > 0), "n_muons": np.int64(len(muon_pt)),
         "id": ident, "path": str(path),
     }
@@ -144,9 +176,14 @@ def collate(events):
     track_feats, _ = _pad([e["track_feats"] for e in events])
     hit_feats, hit_mask = _pad([e["hit_feats"] for e in events])
     hit_det, _ = _pad([e["hit_det"] for e in events])
+    seg_feats, seg_mask = _pad([e["seg_feats"] for e in events])
+    seg_det, _ = _pad([e["seg_det"] for e in events])
+    rpc_feats, rpc_mask = _pad([e["rpc_feats"] for e in events])
     return {
         "track_points": track_points, "track_feats": track_feats, "track_mask": track_mask,
         "hit_feats": hit_feats, "hit_det": hit_det, "hit_mask": hit_mask,
+        "seg_feats": seg_feats, "seg_det": seg_det, "seg_mask": seg_mask,
+        "rpc_feats": rpc_feats, "rpc_mask": rpc_mask,
         "has_muon": np.array([e["has_muon"] for e in events]),
         "n_muons": np.array([e["n_muons"] for e in events]),
     }

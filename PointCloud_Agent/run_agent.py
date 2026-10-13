@@ -250,7 +250,9 @@ def step_ig(args, plan, out):
                 log("WARNING: dataset seems to be on tape only; xrootd reads will likely fail.")
         except AgentError as e:
             log(f"site lookup failed: {e}")
-    files = files[:args.nfiles]
+    files = files[args.first_file:args.first_file + args.nfiles]
+    if not files:
+        raise AgentError(f"No input files left after --first-file {args.first_file}")
     plan["input_files"] = files
     with open(os.path.join(logs, "input_files.txt"), "w") as f:
         f.write("\n".join(files) + "\n")
@@ -312,9 +314,11 @@ def step_check_ig(out, igs):
 #  step 2: ig -> npz + html
 # ════════════════════════════════════════════════════════
 
-def step_pointcloud(out, igs, subtitle):
+def step_pointcloud(out, igs, subtitle, html=True):
     try:
-        from agent import pointcloud, visualize
+        from agent import pointcloud
+        if html:
+            from agent import visualize   # plotly is only needed for the HTML pages
     except ImportError as e:
         raise AgentError(f"{e}. Install once with:  python3 -m pip install --user numpy plotly")
 
@@ -355,10 +359,11 @@ def step_pointcloud(out, igs, subtitle):
                 os.makedirs(os.path.dirname(npz), exist_ok=True)
                 pointcloud.save_npz(npz, arrays, run_no, ev_no, ls_no)
 
-                page = os.path.join(out, "visualize", f"Run_{run_no}", f"{stem}.html")
-                os.makedirs(os.path.dirname(page), exist_ok=True)
-                with open(page, "w", encoding="utf-8") as f:
-                    f.write(visualize.render_page(arrays, counts, run_no, ev_no, subtitle))
+                if html:
+                    page = os.path.join(out, "visualize", f"Run_{run_no}", f"{stem}.html")
+                    os.makedirs(os.path.dirname(page), exist_ok=True)
+                    with open(page, "w", encoding="utf-8") as f:
+                        f.write(visualize.render_page(arrays, counts, run_no, ev_no, subtitle))
 
                 summary.append({"run": run_no, "lumi": ls_no, "event": ev_no, "ig": os.path.basename(ig),
                                 "counts": counts})
@@ -387,6 +392,9 @@ def parse_args(argv):
     p.add_argument("--nevents", type=int, default=100, help="Events to process (default 100, -1 = all)")
     p.add_argument("--per-ig", type=int, default=10, help="Events per ig file (default 10)")
     p.add_argument("--nfiles", type=int, default=1, help="Input files from DAS to use (default 1)")
+    p.add_argument("--first-file", type=int, default=0,
+                   help="Skip this many files of the DAS list (next batch of a dataset; use a new --name)")
+    p.add_argument("--no-html", action="store_true", help="Do not write the per-event HTML pages")
     p.add_argument("--files", nargs="+", help="Explicit input LFNs/URLs instead of the DAS file list")
     p.add_argument("--globaltag", help="Override the GlobalTag")
     p.add_argument("--release", help="Override the DAS release used to pick the era, e.g. CMSSW_12_0_2")
@@ -434,7 +442,7 @@ def main(argv=None):
         summary = []
         if "pointcloud" in steps:
             subtitle = args.dataset or ", ".join(os.path.basename(p) for p in args.ig)
-            summary = step_pointcloud(out, igs, subtitle)
+            summary = step_pointcloud(out, igs, subtitle, html=not args.no_html)
 
         manifest = {
             "created": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -443,7 +451,8 @@ def main(argv=None):
             "command": sys.argv,
             "plan": plan,
             "options": {"nevents": args.nevents, "per_ig": args.per_ig, "nfiles": args.nfiles,
-                        "no_pt_cut": args.no_pt_cut},
+                        "first_file": args.first_file, "no_pt_cut": args.no_pt_cut,
+                        "html": not args.no_html},
             "events": summary,
         }
         with open(os.path.join(out, "logs", "manifest.json"), "w") as f:

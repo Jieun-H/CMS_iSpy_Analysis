@@ -320,6 +320,7 @@ def step_pointcloud(out, igs, subtitle):
 
     events_dir = os.path.join(out, "ig", "Events")
     summary = []
+    seen = set()
     for ig in igs:
         with zipfile.ZipFile(ig) as z:
             for entry in z.namelist():
@@ -327,30 +328,39 @@ def step_pointcloud(out, igs, subtitle):
                     continue
                 rel = entry[entry.index("Events/") + len("Events/"):]     # Run_X/Event_Y
                 raw = z.read(entry)
-                dst = os.path.join(events_dir, rel)
+
+                data = pointcloud.load_ig_text(raw.decode("utf-8", errors="replace"))
+                run_no, ev_no, ls_no = pointcloud.event_id(data)
+                if run_no is None:
+                    run_part, ev_part = rel.split("/")[:2]
+                    run_no, ev_no = int(run_part.split("_")[1]), int(ev_part.split("_")[1])
+                # (run, lumi, event) is the unique key; MC is mostly run=1 and several input files
+                # can repeat (run, event), so lumi goes into the file name.
+                stem = f"Event_{ev_no}" + (f"_LS{ls_no}" if ls_no is not None else "")
+                key = (run_no, ls_no, ev_no)
+                if key in seen:
+                    log(f"WARNING: duplicate event run={run_no} lumi={ls_no} event={ev_no} "
+                        f"({os.path.basename(ig)}); overwriting the earlier output")
+                seen.add(key)
+
+                dst = os.path.join(events_dir, f"Run_{run_no}", stem)
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 with open(dst, "wb") as f:
                     f.write(raw)
 
-                data = pointcloud.load_ig_text(raw.decode("utf-8", errors="replace"))
-                run_no, ev_no = pointcloud.event_id(data)
-                if run_no is None:
-                    run_part, ev_part = rel.split("/")[:2]
-                    run_no, ev_no = int(run_part.split("_")[1]), int(ev_part.split("_")[1])
-
                 arrays = pointcloud.build(data)
                 counts = pointcloud.object_counts(arrays)
 
-                npz = os.path.join(out, "pointcloud", f"Run_{run_no}", f"Event_{ev_no}.npz")
+                npz = os.path.join(out, "pointcloud", f"Run_{run_no}", f"{stem}.npz")
                 os.makedirs(os.path.dirname(npz), exist_ok=True)
-                pointcloud.save_npz(npz, arrays, run_no, ev_no)
+                pointcloud.save_npz(npz, arrays, run_no, ev_no, ls_no)
 
-                page = os.path.join(out, "visualize", f"Run_{run_no}", f"Event_{ev_no}.html")
+                page = os.path.join(out, "visualize", f"Run_{run_no}", f"{stem}.html")
                 os.makedirs(os.path.dirname(page), exist_ok=True)
                 with open(page, "w", encoding="utf-8") as f:
                     f.write(visualize.render_page(arrays, counts, run_no, ev_no, subtitle))
 
-                summary.append({"run": run_no, "event": ev_no, "ig": os.path.basename(ig),
+                summary.append({"run": run_no, "lumi": ls_no, "event": ev_no, "ig": os.path.basename(ig),
                                 "counts": counts})
                 log(f"Run {run_no} Event {ev_no}: tracks={counts['tracks']} "
                     f"electrons={counts['elec_tracks']} pv={counts['vertices']} "

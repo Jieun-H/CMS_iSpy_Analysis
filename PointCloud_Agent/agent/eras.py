@@ -38,7 +38,7 @@ ERAS: List[Era] = [
         cmssw="CMSSW_10_6_30", scram_arch="slc7_amd64_gcc700", container="cmssw-el7",
         ispy_branch="cmssw10", services_branch="master",
         data_globaltag="auto:run2_data", validated=False,
-        notes="ISpy master branch was built locally with CMSSW_10_6_30; cmssw10 branch has no CI for 10_6."),
+        notes="Uses the ISpy cmssw10 branch, which has no CI for 10_6 (unvalidated)."),
     Era(key="run3_120x",
         description="Run3 Summer21 MC (120X) AODSIM",
         release_prefixes=("CMSSW_12_0_", "CMSSW_12_1_"),
@@ -89,8 +89,10 @@ def mc_globaltag(dataset: str) -> Optional[str]:
       Run3Summer21DRPremix-120X_mcRun3_2021_realistic_v6-v2 -> 120X_mcRun3_2021_realistic_v6
     """
     processed = parse_dataset(dataset)["processed"]
-    m = re.match(r"^[^-]+-(\d+X_.+?)-v\d+$", processed)
-    return m.group(1) if m else None
+    m = re.match(r"^[^-]+-(?:pilot_)?(\d+X_.+?)-v\d+$", processed)
+    if not m:
+        return None
+    return re.sub(r"_ext\d+$", "", m.group(1))     # ..._L1v1_ext1 is a dataset extension, not part of the GT
 
 
 def release_from_name(dataset: str) -> Optional[str]:
@@ -110,10 +112,9 @@ def era_for_release(release: str) -> Era:
 
 
 def default_name(dataset: str) -> str:
-    """Short output name: Primary + campaign, e.g. ZToMuMu_M-120To200_..._Run3Summer21DRPremix"""
+    """Output name: Primary + full processed name (keeps era/processing version/-vN apart)."""
     p = parse_dataset(dataset)
-    campaign = p["processed"].split("-")[0]
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", f"{p['primary']}__{campaign}")
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", f"{p['primary']}__{p['processed']}")
 
 
 # SCRAM_ARCH prefix -> OS major version it needs (cmssw-elN on lxplus9)

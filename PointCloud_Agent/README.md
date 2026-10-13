@@ -14,7 +14,7 @@ Give it a CMS DAS dataset name; it produces, per event:
         ▼
   NAME_0.ig … NAME_N.ig  ──► check_ig (are tracks/rechits really there?)
         ▼
-  per event:  pointcloud/Run_X/Event_Y.npz   visualize/Run_X/Event_Y.html
+  per event:  pointcloud/Run_X/Event_Y_LSZ.npz   visualize/Run_X/Event_Y_LSZ.html
 ```
 
 Code is edited locally and pushed to GitHub; it is **run on lxplus** from inside a CMSSW area,
@@ -164,9 +164,9 @@ python3 run_agent.py <dataset>
 
 ```
 <out>/<name>/
-  ig/          NAME_0.ig … NAME_N.ig, NAME_ES.ig (geometry), Events/Run_X/Event_Y (unzipped JSON)
-  visualize/   Run_X/Event_Y.html
-  pointcloud/  Run_X/Event_Y.npz
+  ig/          NAME_0.ig … NAME_N.ig, NAME_ES.ig (geometry), Events/Run_X/Event_Y_LSZ (unzipped JSON)
+  visualize/   Run_X/Event_Y_LSZ.html
+  pointcloud/  Run_X/Event_Y_LSZ.npz
   logs/        setup_cmssw.log, eventcontent.txt, input_files.txt, cmsRun.log, check_ig.txt, manifest.json
 ```
 
@@ -174,7 +174,7 @@ python3 run_agent.py <dataset>
 so every dataset can be traced back to the code that produced it.
 
 View an HTML page: open it from CERNBox (https://cernbox.cern.ch → your EOS folder) or copy it to your laptop
-(`scp <cern-user>@lxplus.cern.ch:<out>/<name>/visualize/Run_X/Event_Y.html .`).
+(`scp <cern-user>@lxplus.cern.ch:<out>/<name>/visualize/Run_X/Event_Y_LSZ.html .`).
 
 ### npz contents
 

@@ -93,13 +93,14 @@ def _fields(data, name):
 
 
 def event_id(data):
-    """(run, event) from Event_V2 / Event_V3."""
+    """(run, event, lumi) from Event_V2 / Event_V3; lumi is None if the collection has no `ls`."""
     for name in ("Event_V3", "Event_V2", "Event_V1"):
         rows = _collection(data, name)
         if rows:
             f = _fields(data, name)
-            return int(rows[0][f.get("run", 0)]), int(rows[0][f.get("event", 1)])
-    return None, None
+            ls = int(rows[0][f["ls"]]) if "ls" in f else None
+            return int(rows[0][f.get("run", 0)]), int(rows[0][f.get("event", 1)]), ls
+    return None, None, None
 
 
 # ════════════════════════════════════════════════════════
@@ -309,10 +310,11 @@ def build(data):
     return OrderedDict((key, fn(data)) for key, fn in _EXTRACTORS.items())
 
 
-def save_npz(path, arrays, run, event):
+def save_npz(path, arrays, run, event, lumi=None):
     """Same keys as the 260911 output, plus secondary_vertices and <key>_columns."""
     extra = {f"{k}_columns": np.array(v) for k, v in COLUMNS.items()}
-    np.savez(path, run=np.array([run]), event=np.array([event]), **arrays, **extra)
+    np.savez(path, run=np.array([run]), event=np.array([event]),
+             lumi=np.array([-1 if lumi is None else lumi]), **arrays, **extra)
 
 
 def object_counts(arrays):

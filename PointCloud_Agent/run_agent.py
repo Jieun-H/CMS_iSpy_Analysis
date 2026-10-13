@@ -378,7 +378,7 @@ def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("dataset", nargs="?", help="DAS dataset name /Primary/Processed/AODSIM")
     p.add_argument("--ig", nargs="+", help="Existing ig files: skip CMSSW, only make npz + html")
-    p.add_argument("--name", help="Output name (default: <primary>__<campaign>)")
+    p.add_argument("--name", help="Output name (default: <primary>__<processed>)")
     p.add_argument("--out", default=user_default_dir("PointCloud_Agent_output", "PointCloud_Agent_output"),
                    help="Output base directory (default: EOS user area on lxplus, else ~)")
     p.add_argument("--cmssw-base",

@@ -34,5 +34,14 @@ clone() {  # clone <repo> <branch> <dir>; refuse to silently use a different bra
 clone ispy-analyzers "$ISPY_BRANCH" ISpy/Analyzers
 clone ispy-services "$SERVICES_BRANCH" ISpy/Services
 
+# ISpyMuon (cmssw10) fetches GEMGeometry with getData(), which throws NoProxyException when the
+# job has no GEM geometry (e.g. 2016/2018 conditions). getHandle() returns an invalid handle
+# instead; the module already handles a null gemGeometry_. Idempotent.
+MUON=ISpy/Analyzers/src/ISpyMuon.cc
+if grep -q 'gemGeometry_ *= *&eventSetup.getData(gemGeometryToken_);' "$MUON"; then
+  sed -i 's|gemGeometry_ *= *&eventSetup.getData(gemGeometryToken_);|{ auto gemH = eventSetup.getHandle(gemGeometryToken_); gemGeometry_ = gemH.isValid() ? gemH.product() : nullptr; }|' "$MUON"
+  echo "patched $MUON (optional GEM geometry)"
+fi
+
 scram b -j8
 echo "SETUP_OK $BASE/$RELEASE"

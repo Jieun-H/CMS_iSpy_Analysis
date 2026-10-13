@@ -239,6 +239,7 @@ Where the versions come from:
 | `Input is MiniAOD` | use the AOD/AODSIM version of the dataset |
 | xrootd errors in `cmsRun.log` | dataset on tape only (agent prints the sites) → choose another dataset or request a disk copy with Rucio |
 | `ig files contain no tracks` | every collection was "not found" — see `logs/check_ig.txt` (ISpy error list) |
+| `No data of type "GEMGeometry"` in ISpyMuon | cmssw10 ISpyMuon requires GEM geometry. `setup_cmssw.sh` patches `ISpyMuon.cc` (`getData` → `getHandle`); with a manual install apply the same `sed` (see the script) and `scram b` |
 | `scram b` fails in `setup_cmssw.log` | ISpy branch does not compile in that release; report the log |
 | `No module named plotly` | `python3 -m pip install --user numpy plotly` |
 

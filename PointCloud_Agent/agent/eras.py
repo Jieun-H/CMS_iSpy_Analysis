@@ -37,8 +37,9 @@ ERAS: List[Era] = [
         release_prefixes=("CMSSW_10_6_",),
         cmssw="CMSSW_10_6_30", scram_arch="slc7_amd64_gcc700", container="cmssw-el7",
         ispy_branch="cmssw10", services_branch="master",
-        data_globaltag="auto:run2_data", validated=False,
-        notes="Uses the ISpy cmssw10 branch, which has no CI for 10_6 (unvalidated)."),
+        data_globaltag="auto:run2_data", validated=True,
+        notes="ISpy cmssw10 branch (no CI for 10_6). Checked by hand on UL16 MC (10 events, check_ig OK); "
+              "setup_cmssw.sh patches ISpyMuon to make GEM geometry optional."),
     Era(key="run3_120x",
         description="Run3 Summer21 MC (120X) AODSIM",
         release_prefixes=("CMSSW_12_0_", "CMSSW_12_1_"),

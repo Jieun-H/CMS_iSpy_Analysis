@@ -16,6 +16,10 @@ Inputs   all tracks (tracks key: trackExtrapolator, pT > 1 GeV) + calorimeter hi
          standalone_muon) and muon_chambers (only chambers matched to a reco muon)
          are never inputs: they are the answer.
 Label    has_muon: at least one global muon above pt_min, taken from global_muon.
+         track_is_muon (per track): the track is the inner track of a tracker muon above
+         pt_min. tracks and muon_tracks carry no common id, so a track is matched when both
+         Bezier end points (the Extras_V1 pos_1, pos_2 the curve passes through) lie within
+         match_tol (m) of a muon track's end points.
 
     ds = NpzEventDataset(glob.glob("out/*/pointcloud/Run_*/*.npz"), seed=0)
     batch = collate([ds[i] for i in range(8)])
@@ -24,6 +28,7 @@ Label    has_muon: at least one global muon above pt_min, taken from global_muon
     batch["hit_feats"]      # (B, H, 5)  x,y,z,energy,time; hit_det = index into hit_keys
     batch["seg_feats"]      # (B, S, 6)  segment end points x1,y1,z1,x2,y2,z2; seg_det 0=CSC 1=DT
     batch["rpc_feats"]      # (B, R, 3)  RPC hit x,y,z
+    batch["track_is_muon"]  # (B, T) per-track label (False on padding)
 """
 import numpy as np
 
@@ -37,10 +42,12 @@ SEG_FEATURES = ("x1", "y1", "z1", "x2", "y2", "z2")     # per segment
 SEG_KEYS = ("csc_segments", "dt_segments")              # seg_det = position in this tuple
 RPC_FEATURES = ("x", "y", "z")                          # per RPC hit
 POINTS_PER_TRACK = 33
+MATCH_TOL = 1e-3                                        # m, track <-> tracker muon end points
 
 _DEFAULT_COLUMNS = {
     "tracks": ["x", "y", "z", "pt", "track_id"],
     "global_muon": ["x", "y", "z", "pt", "muon_id"],
+    "muon_tracks": ["x", "y", "z", "pt", "track_id"],
     "ecal_eb": ["x", "y", "z", "energy", "eta", "phi", "time", "detid"],
     "ecal_ee": ["x", "y", "z", "energy", "eta", "phi", "time", "detid"],
     **{k: ["x", "y", "z", "energy", "eta", "phi", "time", "detid"]
@@ -73,9 +80,9 @@ def _group_by_id(arr, id_col):
     return np.split(arr[order], starts[1:]) if len(uniq) else []
 
 
-def tracks(npz):
+def tracks(npz, key="tracks"):
     """-> points (T, 33, 3) float32, features (T, len(TRACK_FEATURES)) float32"""
-    arr, c = _array(npz, "tracks")
+    arr, c = _array(npz, key)
     groups = _group_by_id(arr, c["track_id"])
     bad = [len(g) for g in groups if len(g) != POINTS_PER_TRACK]
     if bad:
@@ -120,11 +127,33 @@ def muons(npz, pt_min):
     return pts[pts > pt_min]
 
 
-def event(path, rng=None, pt_min=10.0, hit_keys=HIT_KEYS):
+def match_tracks(track_points, muon_points, tol=MATCH_TOL):
+    """For each track, distance (m) to the closest muon track, taken as the larger of the
+    two end-point distances; inf when there is no muon track. -> (T,) float32, (T,) index"""
+    if not len(track_points) or not len(muon_points):
+        return np.full(len(track_points), np.inf, dtype=np.float32), np.full(len(track_points), -1)
+    ends_t = track_points[:, [0, -1]]                     # (T, 2, 3)
+    ends_m = muon_points[:, [0, -1]]                      # (M, 2, 3)
+    d = np.linalg.norm(ends_t[:, None] - ends_m[None], axis=-1).max(axis=-1)   # (T, M)
+    j = d.argmin(axis=1)
+    return d[np.arange(len(d)), j], j
+
+
+def track_labels(npz, track_points, pt_min, tol=MATCH_TOL):
+    """-> (T,) bool: track matched to a tracker muon with pT > pt_min (label, never an input)."""
+    muon_points, muon_feats = tracks(npz, "muon_tracks")
+    keep = muon_feats[:, TRACK_FEATURES.index("pt")] > pt_min
+    dist, _ = match_tracks(track_points, muon_points[keep], tol)
+    return dist < tol
+
+
+def event(path, rng=None, pt_min=10.0, hit_keys=HIT_KEYS, match_tol=MATCH_TOL):
     """One npz -> dict of inputs and label. rng: shuffle tracks and hits (None keeps file order).
-    hit_keys: calorimeter parts to use, e.g. ("ecal_eb", "ecal_ee") for ECAL only."""
+    hit_keys: calorimeter parts to use, e.g. ("ecal_eb", "ecal_ee") for ECAL only.
+    match_tol: end-point distance (m) for track_is_muon."""
     with np.load(path) as npz:
         track_points, track_feats = tracks(npz)
+        track_is_muon = track_labels(npz, track_points, pt_min, match_tol)
         hit_feats, hit_det = hits(npz, hit_keys)
         seg_feats, seg_det = segments(npz)
         rpc_feats = rpc_hits(npz)
@@ -132,7 +161,7 @@ def event(path, rng=None, pt_min=10.0, hit_keys=HIT_KEYS):
         ident = tuple(int(npz[k][0]) for k in ("run", "lumi", "event") if k in npz.files)
     if rng is not None:
         t = rng.permutation(len(track_points))
-        track_points, track_feats = track_points[t], track_feats[t]
+        track_points, track_feats, track_is_muon = track_points[t], track_feats[t], track_is_muon[t]
         h = rng.permutation(len(hit_feats))
         hit_feats, hit_det = hit_feats[h], hit_det[h]
         g = rng.permutation(len(seg_feats))
@@ -143,6 +172,7 @@ def event(path, rng=None, pt_min=10.0, hit_keys=HIT_KEYS):
         "hit_feats": hit_feats, "hit_det": hit_det,
         "seg_feats": seg_feats, "seg_det": seg_det, "rpc_feats": rpc_feats,
         "has_muon": np.int64(len(muon_pt) > 0), "n_muons": np.int64(len(muon_pt)),
+        "track_is_muon": track_is_muon,
         "id": ident, "path": str(path),
     }
 
@@ -154,18 +184,21 @@ class NpzEventDataset:
     worker its own seed (worker_init_fn) so the workers do not repeat the same order.
     """
 
-    def __init__(self, paths, seed=None, shuffle=True, pt_min=10.0, hit_keys=HIT_KEYS):
+    def __init__(self, paths, seed=None, shuffle=True, pt_min=10.0, hit_keys=HIT_KEYS,
+                 match_tol=MATCH_TOL):
         self.paths = sorted(str(p) for p in paths)
         self.rng = np.random.default_rng(seed)
         self.shuffle = shuffle
         self.pt_min = pt_min
         self.hit_keys = tuple(hit_keys)
+        self.match_tol = match_tol
 
     def __len__(self):
         return len(self.paths)
 
     def __getitem__(self, i):
-        return event(self.paths[i], self.rng if self.shuffle else None, self.pt_min, self.hit_keys)
+        return event(self.paths[i], self.rng if self.shuffle else None, self.pt_min, self.hit_keys,
+                     self.match_tol)
 
 
 def _pad(arrays, fill=0):
@@ -188,11 +221,12 @@ def collate(events):
     seg_feats, seg_mask = _pad([e["seg_feats"] for e in events])
     seg_det, _ = _pad([e["seg_det"] for e in events])
     rpc_feats, rpc_mask = _pad([e["rpc_feats"] for e in events])
+    track_is_muon, _ = _pad([e["track_is_muon"] for e in events], fill=False)
     return {
         "track_points": track_points, "track_feats": track_feats, "track_mask": track_mask,
         "hit_feats": hit_feats, "hit_det": hit_det, "hit_mask": hit_mask,
         "seg_feats": seg_feats, "seg_det": seg_det, "seg_mask": seg_mask,
-        "rpc_feats": rpc_feats, "rpc_mask": rpc_mask,
+        "rpc_feats": rpc_feats, "rpc_mask": rpc_mask, "track_is_muon": track_is_muon,
         "has_muon": np.array([e["has_muon"] for e in events]),
         "n_muons": np.array([e["n_muons"] for e in events]),
     }

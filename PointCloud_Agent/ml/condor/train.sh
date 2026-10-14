@@ -12,6 +12,7 @@ echo "host $(hostname)"
 nvidia-smi --query-gpu=name,memory.total --format=csv || true
 python3 -c 'import torch; print("torch", torch.__version__, "cuda", torch.cuda.is_available())'
 local_pack=${_CONDOR_SCRATCH_DIR:-$(mktemp -d)}/pack
+trap 'rm -rf "$local_pack"' EXIT            # never sent back with the job output
 mkdir -p "$local_pack"
 cp -r "$pack"/. "$local_pack"/
 echo "pack copied: $(du -sh "$local_pack" | cut -f1)"

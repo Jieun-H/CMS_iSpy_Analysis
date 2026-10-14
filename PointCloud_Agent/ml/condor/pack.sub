@@ -3,13 +3,20 @@
 #       targets=/eos/user/j/jieun/PointCloud_Agent_output/ZToMuMu_UL16_train \
 #       pack=/eos/user/j/jieun/ml/packed/zmm_ul16_v1
 # Unset lcg / args are empty: the job script then uses its default LCG view (LCG_107_cuda).
-# Optional: "args=--split 0.7 0.15 0.15 --seed 0", lcg=<LCG view folder>, flavour=<JobFlavour>
+# Optional: logs=<EOS folder for .out/.err>, "args=--split 0.7 0.15 0.15 --seed 0", lcg=<LCG view folder>, flavour=<JobFlavour>
 executable  = ml/condor/pack.sh
 arguments   = "$ENV(PWD) $(pack) $(targets) $(args)"
 environment = "LCG_VIEW=$(lcg)"
-output      = ml/condor/logs/pack.$(ClusterId).out
-error       = ml/condor/logs/pack.$(ClusterId).err
-log         = ml/condor/logs/pack.$(ClusterId).log
+# stdout / stderr go straight to EOS (<logs>, default /eos/user/j/jieun/ml/logs) with xrdcp,
+# so nothing is written to AFS (2 GB home quota). No condor user log is kept; use
+# condor_q / condor_history / condor_tail for the job state.
+if ! defined logs
+  logs = /eos/user/j/jieun/ml/logs
+endif
+output_destination  = root://eosuser.cern.ch/$(logs)/
+MY.XRDCP_CREATE_DIR = True
+output      = pack.$(ClusterId).out
+error       = pack.$(ClusterId).err
 request_cpus   = 1
 request_memory = 4 GB
 request_disk   = 6 GB

@@ -15,4 +15,5 @@ cd "$tmp"
 find . -type f | while read -r f; do
     xrdcp -f -p "$f" "root://eosuser.cern.ch/$out/${f#./}"
 done
+rm -rf "$tmp"                                   # never sent back with the job output
 echo "copied to $out"

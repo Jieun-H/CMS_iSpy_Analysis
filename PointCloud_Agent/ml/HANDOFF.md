@@ -233,6 +233,10 @@ python3 run_agent.py <DAS dataset> --name <출력 이름> --nevents 20000 --nfil
 | `ml/packed.py` | 묶음 읽기, 특징 변환, 정규화(train 합계에서), 패딩 |
 | `ml/particlenet.py` | 트랙 인코더(`conv` 1D Conv / `mlp` 끝점·방향 12개) → 노드 종류 임베딩 → EdgeConv 3블록 → 트랙별/이벤트별 출력 |
 | `ml/train.py` | 학습·검증·테스트, 체크포인트, 지표 |
+| `ml/metrics.py` | ROC AUC, AP, 분할 요약 (numpy만) |
+| `ml/baseline.py` | 단일 변수 기준선: pT, \|η\|, χ²/ndof, ndof, 상대 isolation, 주변 segment·RPC 수, 끝점 주변 ECAL 에너지. GPU 불필요 |
+| `ml/evaluate.py` | 학습된 run을 다른 묶음에 적용. 작동점(뮤온 효율 90/95/99%)은 run 자신의 val에서 정하고, 이벤트 종류(mumu/ee/emu/other)별 뮤온 효율·전자 오판율·기타 오판율 |
+| `ml/report.py` | 발표용 그림과 표: ROC(기준선 포함), 학습 곡선, 점수 분포, pT·\|η\|별 효율·오판율, summary.md, evals.md. matplotlib만 (LCG view) |
 | `ml/condor/pack.sub`, `pack.sh` | condor CPU 작업으로 묶기 (scratch에 쓰고 xrdcp로 EOS에 복사) |
 | `ml/condor/train.sub`, `train.sh` | condor GPU 작업으로 학습 (묶음을 scratch로 복사, 결과는 EOS에 바로 씀) |
 
@@ -262,5 +266,48 @@ condor_submit ml/condor/train.sub pack=... runs=... name=A_conv "args=--hit-keys
 - LCG view 기본값: 묶기·학습 모두 `LCG_107_cuda` (`x86_64-el9-gcc11-opt`, Python 3.11.9, torch 2.5.1, numpy 1.26.4).
   lxplus에서 확인된 cuda view: `LCG_105_cuda` (3.9.12, torch 2.1.0a0), `LCG_106_cuda` (3.11.9, torch 2.3.1), `LCG_107_cuda`.
   다른 view는 `lcg=<폴더>`로 고름. 코드는 torch 2.1(Python 3.9, numpy 1.23)과 2.14에서 로컬 실행 확인.
-- 로그: `ml/condor/logs/` (AFS, 작음). 결과: `<runs>/<name>/` (EOS).
+- 모든 결과는 EOS `/eos/user/j/jieun/ml/` 아래: `packed/` (묶음), `runs/<name>/` (학습), `logs/` (condor .out/.err).
+  로그 폴더는 `logs=<EOS 폴더>`로 바꿀 수 있음. condor user log(.log)는 두지 않음 (AFS를 쓰지 않기 위해).
 - GPU 메모리가 부족하면 `"args=--batch-size 16"`.
+
+### 진행 상황 (2026-10-14, lxplus)
+
+- 묶음 `/eos/user/j/jieun/ml/packed/zmm_ul16_v1` 완료 (condor 11951522): train 14,000 / val 3,000 / test 3,000 이벤트,
+  pT > 10 뮤온 트랙 18,185 / 3,908 / 3,807 (합 25,900 = check_dataset과 일치).
+- 200개 시험 (`lxplus-gpu`, Tesla T4, LCG_107_cuda torch 2.5.1): 끝까지 정상, epoch당 약 2초 (128+30 이벤트)
+  → 전체는 epoch당 3~4분으로 어림. test 200개에서 pT > 10 트랙의 71%가 뮤온 → `ap_pt`의 무작위 기준이 약 0.7.
+- 본 학습 제출: `B_conv` (11951542), `B_mlp` (11951543, `--track-encoder mlp`). 결과는 `/eos/user/j/jieun/ml/runs/<name>/`.
+- condor 주의: 제출 파일에서 `$(var:기본값)` 문법이 lxplus condor에서 풀리지 않음 (첫 묶기 작업 실패 원인).
+  기본값은 실행 스크립트(`${LCG_VIEW:-...}`)와 `if ! defined`로 처리. 제출 전 `condor_submit -dry-run dry.txt ...`로 확인 가능.
+- 실행 중인 작업의 출력은 `condor_tail <번호>` (`-stderr`, `-f`). `/eos/user/j/jieun/ml/logs/*.out`은 작업이 끝나야 생김.
+- 다음: 학습 결과를 `python3 -m ml.baseline --pack /eos/user/j/jieun/ml/packed/zmm_ul16_v1` (test 분할)의 기준선과 비교.
+- 학습 결과 (test 3,000 이벤트, pT > 10 트랙 4,785개 중 뮤온 3,807개 = 79.6%):
+  | run | auc_pt | ap_pt | best epoch |
+  |---|---|---|---|
+  | `B_conv` | 0.99858 | 0.99966 | 17 |
+  | `B_mlp` | 0.99833 | 0.99960 | 15 |
+  두 인코더 차이는 통계 오차 수준 → Bezier 33점의 순서 처리는 정보를 더하지 않음. epoch당 약 20초 (T4).
+- 처음 두 학습 작업은 끝난 뒤 .out을 AFS로 옮기다 quota 초과로 HOLD (결과는 EOS에 모두 있음).
+  → condor 출력을 EOS로 보내도록 수정 (`output_destination`, `MY.XRDCP_CREATE_DIR`).
+- 지금 결과는 Z→μμ로 학습하고 Z→μμ로 테스트한 것. 다음: DY→ee, eμ 샘플로 일반화 확인 (1절 평가 계획).
+
+### 평가용 전자 정보 (묶음에 추가, 모델 입력 아님)
+
+- 새 묶음에는 트랙마다 가장 가까운 GSF 전자와의 안쪽 방향 각도(`track_e_angle`, rad), 안쪽 점 거리(`track_e_d0`, m),
+  그 전자의 pT(`track_e_pt`), 이벤트마다 GSF 전자 pT(`ele_pt`, 최대 4개)가 들어감.
+  GSF 트랙은 다시 피팅한 것이라 끝점이 일치하지 않음 (tracker muon과 다름). 안쪽 방향은 일치.
+- 옛 묶음(`zmm_ul16_v1`)에는 없음 → "전자 정보 없음"(inf / 0)으로 읽혀 그대로 사용 가능 (평가는 "all" 범주만).
+- `ml/evaluate.py`의 전자 트랙 정의(`--e-angle 0.01 --e-d0 0.005`)는 **잠정값**. DYJetsToLL에서 출력되는
+  `electron match` 줄(ee 이벤트 트랙의 각도 분포)을 보고 정할 것.
+
+### 실행 (lxplus, PointCloud_Agent 폴더)
+```bash
+# 발표용 그림 (CPU, 로그인 노드 가능)
+bash -c 'source /cvmfs/sft.cern.ch/lcg/views/LCG_107_cuda/x86_64-el9-gcc11-opt/setup.sh && python3 -m ml.report --runs Conv=/eos/user/j/jieun/ml/runs/B_conv MLP=/eos/user/j/jieun/ml/runs/B_mlp --out /eos/user/j/jieun/ml/reports/zmm_v1 --formats png pdf'
+# 새 샘플을 시험 전용으로 묶기 (모든 이벤트를 test에)
+condor_submit ml/condor/pack.sub targets=<출력 폴더> pack=/eos/user/j/jieun/ml/packed/<이름> "args=--split 0 0 1"
+# 학습된 모델을 새 샘플에 적용 (GPU면 lxplus-gpu, CPU도 가능하나 느림)
+python3 -m ml.evaluate --run /eos/user/j/jieun/ml/runs/B_conv --pack /eos/user/j/jieun/ml/packed/<이름>
+```
+- 계획: ZToMuMu로 학습한 `B_conv`를 DYJetsToLL_M-50(UL16, 디스크에 있으면)에 적용 → ee 이벤트의 고 pT 전자 오판율로
+  pT·isolation 지름길 여부 확인. 고질량 DYToMuMu/DYToEE(M-120To200 등)는 UL16에서 모두 테이프에만 있음.

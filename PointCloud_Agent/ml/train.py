@@ -37,6 +37,7 @@ import torch
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ml import inputs, packed  # noqa: E402
+from ml.metrics import summarise  # noqa: E402
 from ml.pack import git_info  # noqa: E402
 from ml.particlenet import TrackParticleNet  # noqa: E402
 
@@ -69,48 +70,6 @@ def to_device(b, device):
     return {k: v.to(device, non_blocking=True) for k, v in b.items()}
 
 
-# ---------------------------------------------------------------- metrics (numpy, no sklearn)
-
-def roc_auc(score, label):
-    """Mann-Whitney AUC with tied scores averaged; None if one class is missing."""
-    label = np.asarray(label).astype(bool)
-    n_pos, n_neg = label.sum(), (~label).sum()
-    if not n_pos or not n_neg:
-        return None
-    order = np.argsort(score, kind="mergesort")
-    s = np.asarray(score)[order]
-    ranks = np.empty(len(s))
-    _, start, count = np.unique(s, return_index=True, return_counts=True)
-    for a, c in zip(start, count):
-        ranks[a:a + c] = a + (c + 1) / 2
-    r = np.empty(len(s))
-    r[order] = ranks
-    return float((r[label].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
-
-
-def average_precision(score, label):
-    label = np.asarray(label).astype(bool)
-    if not label.any():
-        return None
-    order = np.argsort(-np.asarray(score), kind="mergesort")
-    hit = label[order]
-    precision = np.cumsum(hit) / np.arange(1, len(hit) + 1)
-    return float(precision[hit].mean())
-
-
-def summarise(score, label, pt, pt_min, task):
-    out = {"n": int(len(label)), "n_pos": int(np.sum(label)),
-           "auc": roc_auc(score, label), "ap": average_precision(score, label),
-           "acc@0.5": float(np.mean((score > 0.5) == (label > 0.5))) if len(label) else None}
-    if task == "track":
-        # tracks below pt_min can never be labelled; the hard part is among the rest
-        hi = pt > pt_min
-        out.update({f"{k}_pt": v for k, v in (("n", int(hi.sum())), ("n_pos", int(label[hi].sum())),
-                                              ("auc", roc_auc(score[hi], label[hi])),
-                                              ("ap", average_precision(score[hi], label[hi])))})
-    return out
-
-
 # ---------------------------------------------------------------- loop
 
 def run_epoch(model, loader, device, task, pos_weight, optimiser=None, scaler=None,
@@ -120,7 +79,7 @@ def run_epoch(model, loader, device, task, pos_weight, optimiser=None, scaler=No
     loss_fn = torch.nn.BCEWithLogitsLoss(reduction="sum",
                                          pos_weight=torch.tensor(pos_weight, device=device))
     total, count = 0.0, 0
-    scores, labels, pts, events = [], [], [], []
+    scores, labels, pts, etas, events = [], [], [], [], []
     for step, b in enumerate(loader):
         if limit is not None and step >= limit:
             break
@@ -150,13 +109,15 @@ def run_epoch(model, loader, device, task, pos_weight, optimiser=None, scaler=No
             labels.append(lb.cpu().numpy())
             if task == "track":
                 pts.append(b["track_pt"][m].cpu().numpy())
+                etas.append(b["track_eta"][m].cpu().numpy())
                 events.append(b["index"].unsqueeze(1).expand_as(m)[m].cpu().numpy())
             else:
                 events.append(b["index"].cpu().numpy())
     out = {"loss": total / max(count, 1)}
     if collect:
         cat = (lambda x: np.concatenate(x) if x else np.zeros(0))
-        out.update(score=cat(scores), label=cat(labels), pt=cat(pts), event=cat(events))
+        out.update(score=cat(scores), label=cat(labels), pt=cat(pts), eta=cat(etas),
+                   event=cat(events))
     return out
 
 
@@ -342,7 +303,7 @@ def main(argv=None):
     with open(os.path.join(args.out, "test_metrics.json"), "w") as f:
         json.dump(m, f, indent=2)
     np.savez(os.path.join(args.out, "test_predictions.npz"), score=te["score"], label=te["label"],
-             pt=te["pt"], event=te["event"])
+             pt=te["pt"], eta=te["eta"], event=te["event"])
     log(f"test (best epoch {ck['epoch']}): {json.dumps(m)}")
     return 0
 

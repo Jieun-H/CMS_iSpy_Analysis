@@ -8,7 +8,13 @@ serves all experiments:
   - every track feature in inputs.TRACK_INFO_FEATURES,
   - every calorimeter part in inputs.HIT_KEYS (choose with hit_keys at training),
   - per track: distance to the closest tracker muon and that muon's pT (label with any
-    pt_min / match_tol at training), per event: global muon pTs (event label).
+    pt_min / match_tol at training), per event: global muon pTs (event label),
+  - evaluation only, never a model input: per track the angle (rad) between the track's
+    inner direction and the closest GSF electron's, the inner-point distance (m) and pT of
+    that electron; per event the GSF electron pTs (ee / mumu / emu event categories).
+    GSF tracks are refitted, so their end points do not coincide with the track's
+    (unlike tracker muons); the direction at the inner point does. Packs made before this
+    have no electron arrays; they read as "no electron information" (inf / 0).
 
 Layout of <pack>/<split>/:
     meta.json            array dtypes and shapes, npz paths (event order), config
@@ -23,17 +29,41 @@ import numpy as np
 from ml import inputs
 
 GLB_SLOTS = 4                                   # global muon pTs kept per event, highest first
-PER_EVENT = ("n_tracks", "n_hits", "n_segs", "n_rpc", "glb_pt")
+PER_EVENT = ("n_tracks", "n_hits", "n_segs", "n_rpc", "glb_pt", "ele_pt")
 PER_OBJECT = {                                  # array -> the per-event count that indexes it
     "track_points": "n_tracks", "track_info": "n_tracks",
     "track_mu_dist": "n_tracks", "track_mu_pt": "n_tracks",
+    "track_e_angle": "n_tracks", "track_e_d0": "n_tracks", "track_e_pt": "n_tracks",
     "hit_feats": "n_hits", "hit_det": "n_hits",
     "seg_feats": "n_segs", "seg_det": "n_segs",
     "rpc_feats": "n_rpc",
 }
 
 
+# arrays added after the first packs; an old pack reads them with these fills
+OPTIONAL = {"ele_pt": 0.0, "track_e_angle": np.inf, "track_e_d0": np.inf, "track_e_pt": 0.0}
+
+
 # ---------------------------------------------------------------- reading npz (pack time)
+
+def _inner_direction(points):
+    d = points[:, 1] - points[:, 0]
+    return d / np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-12)
+
+
+def match_electrons(points, e_points, e_pt):
+    """Per track: angle (rad) to the closest GSF electron by inner direction, that electron's
+    inner-point distance (m) and pT. inf / inf / 0 when the event has no electron."""
+    n = len(points)
+    if not n or not len(e_points):
+        return np.full(n, np.inf, np.float32), np.full(n, np.inf, np.float32), np.zeros(n, np.float32)
+    cos = _inner_direction(points) @ _inner_direction(e_points).T          # (T, E)
+    angle = np.arccos(np.clip(cos, -1, 1))
+    j = angle.argmin(axis=1)
+    d0 = np.linalg.norm(points[:, 0] - e_points[j, 0], axis=1)
+    return (angle[np.arange(n), j].astype(np.float32), d0.astype(np.float32),
+            e_pt[j].astype(np.float32))
+
 
 def read_raw(path):
     """One npz -> dict of raw arrays (no selection, no transform)."""
@@ -46,8 +76,13 @@ def read_raw(path):
         seg_feats, seg_det = inputs.segments(npz)
         rpc = inputs.rpc_hits(npz)
         glb = np.sort(inputs.muons(npz, -np.inf))[::-1][:GLB_SLOTS]
+        e_points, e_feats = inputs.tracks(npz, "elec_tracks")
+        e_angle, e_d0, e_pt = match_electrons(points, e_points, e_feats[:, 0])
+        ele = np.sort(e_feats[:, 0])[::-1][:GLB_SLOTS]
     glb_pt = np.zeros(GLB_SLOTS, dtype=np.float32)
     glb_pt[:len(glb)] = glb
+    ele_pt = np.zeros(GLB_SLOTS, dtype=np.float32)
+    ele_pt[:len(ele)] = ele
     return {
         "track_points": points, "track_info": info,
         "track_mu_dist": dist.astype(np.float32), "track_mu_pt": mu_pt.astype(np.float32),
@@ -56,6 +91,7 @@ def read_raw(path):
         "rpc_feats": rpc,
         "n_tracks": np.int32(len(points)), "n_hits": np.int32(len(hit_feats)),
         "n_segs": np.int32(len(seg_feats)), "n_rpc": np.int32(len(rpc)), "glb_pt": glb_pt,
+        "track_e_angle": e_angle, "track_e_d0": e_d0, "track_e_pt": e_pt, "ele_pt": ele_pt,
     }
 
 
@@ -218,13 +254,22 @@ class PackedSplit:
                              for c in ("n_tracks", "n_hits", "n_segs", "n_rpc")}
         return self._arrays[name]
 
+    @property
+    def has_electrons(self):
+        """False for packs made before the electron arrays were added."""
+        return "ele_pt" in self.meta["arrays"]
+
     def event(self, e):
         """Raw arrays of event e (same keys as read_raw)."""
         self.array("n_tracks")
-        out = {n: np.asarray(self.array(n)[e]) for n in PER_EVENT}
+        out = {}
+        for n in PER_EVENT:
+            out[n] = (np.asarray(self.array(n)[e]) if n in self._arrays
+                      else np.full(GLB_SLOTS, OPTIONAL[n], np.float32))
         for n, count in PER_OBJECT.items():
             o = self._offsets[count]
-            out[n] = np.asarray(self.array(n)[o[e]:o[e + 1]])
+            out[n] = (np.asarray(self.array(n)[o[e]:o[e + 1]]) if n in self._arrays
+                      else np.full(o[e + 1] - o[e], OPTIONAL[n], np.float32))
         return out
 
 
@@ -264,6 +309,9 @@ class InputConfig:
 
 
 class Normalizer:
+    """Mean / std per input group from the train split's sums (ml/pack.py). A trained model
+    keeps its own: Normalizer.from_json(checkpoint["config"]["normalisation"], cfg)."""
+
     def __init__(self, stats, cfg):
         self.cfg = cfg
         self.track_points = mean_std(stats, ["track_points"])
@@ -280,6 +328,15 @@ class Normalizer:
         if mean is None or not x.size:
             return x.astype(np.float32)
         return ((x - mean) / std).astype(np.float32)
+
+    @classmethod
+    def from_json(cls, saved, cfg):
+        norm = cls.__new__(cls)
+        norm.cfg = cfg
+        for k, v in saved.items():
+            setattr(norm, k, (None, None) if v is None else
+                    (np.array(v["mean"], np.float32), np.array(v["std"], np.float32)))
+        return norm
 
     def to_json(self):
         def j(ms):
@@ -300,6 +357,7 @@ def event_inputs(raw, cfg, norm):
         "track_coord": eta_phi(pts[:, -1]) if len(pts) else np.zeros((0, 2), np.float32),
         "track_label": label.astype(np.float32),
         "track_pt": raw["track_info"][:, 0].astype(np.float32),
+        "track_eta": raw["track_info"][:, 1].astype(np.float32),
     }
     # calorimeter hits of the chosen parts; hit type = 1 + position in hit_keys
     h, det = raw["hit_feats"], raw["hit_det"].astype(np.int64)
@@ -335,7 +393,7 @@ def pad_batch(events):
     """List of event_inputs dicts -> padded batch (numpy) with masks."""
     out = {}
     for key, mask_name in (("track_points", "track_mask"), ("track_scalars", None),
-                           ("track_coord", None), ("track_label", None), ("track_pt", None),
+                           ("track_coord", None), ("track_label", None), ("track_pt", None), ("track_eta", None),
                            ("other_feats", "other_mask"), ("other_type", None), ("other_coord", None)):
         arrays = [e[key] for e in events]
         n = max(1, max(len(a) for a in arrays))

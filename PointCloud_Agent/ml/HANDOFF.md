@@ -307,7 +307,10 @@ bash -c 'source /cvmfs/sft.cern.ch/lcg/views/LCG_107_cuda/x86_64-el9-gcc11-opt/s
 # 새 샘플을 시험 전용으로 묶기 (모든 이벤트를 test에)
 condor_submit ml/condor/pack.sub targets=<출력 폴더> pack=/eos/user/j/jieun/ml/packed/<이름> "args=--split 0 0 1"
 # 학습된 모델을 새 샘플에 적용 (GPU면 lxplus-gpu, CPU도 가능하나 느림)
-python3 -m ml.evaluate --run /eos/user/j/jieun/ml/runs/B_conv --pack /eos/user/j/jieun/ml/packed/<이름>
+python3 -m ml.evaluate --run /eos/user/j/jieun/ml/runs/B_conv --pack /eos/user/j/jieun/ml/packed/<이름> --ref-pack /eos/user/j/jieun/ml/packed/zmm_ul16_v1
 ```
+- `B_conv`, `B_mlp`의 config.json에는 묶음 경로가 condor 임시 폴더(`/pool/condor/...`)로 기록됨 (버그, 수정됨:
+  이후 학습은 `--pack-origin`으로 원래 EOS 경로를 기록). 이 두 run에는 `ml.report --pack ...`,
+  `ml.evaluate --ref-pack ...`로 `/eos/user/j/jieun/ml/packed/zmm_ul16_v1`을 직접 줄 것.
 - 계획: ZToMuMu로 학습한 `B_conv`를 DYJetsToLL_M-50(UL16, 디스크에 있으면)에 적용 → ee 이벤트의 고 pT 전자 오판율로
   pT·isolation 지름길 여부 확인. 고질량 DYToMuMu/DYToEE(M-120To200 등)는 UL16에서 모두 테이프에만 있음.

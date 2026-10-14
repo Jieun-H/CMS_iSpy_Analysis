@@ -1,5 +1,7 @@
 """ROC AUC, average precision and the per-split summary used by ml/train.py and ml/baseline.py
 (numpy only, no sklearn)."""
+import os
+
 import numpy as np
 
 
@@ -41,6 +43,15 @@ def summarise(score, label, pt, pt_min, task):
                                               ("auc", roc_auc(score[hi], label[hi])),
                                               ("ap", average_precision(score[hi], label[hi])))})
     return out
+
+
+def run_pack(config, given=None):
+    """Pack of a run: --pack if given, else the one recorded in its config.json. Runs made by
+    condor before --pack-origin existed recorded the job's scratch copy, which is gone."""
+    path = given or config["pack"]["path"]
+    if not os.path.isfile(os.path.join(path, "pack.json")):
+        raise SystemExit(f"pack {path} not found (a condor scratch copy?); give it with --pack (ml.report) / --ref-pack (ml.evaluate)")
+    return path
 
 
 def roc_curve(score, label):

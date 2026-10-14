@@ -18,7 +18,8 @@ of a GSF electron with pT > pt_min; these cuts are provisional, check them with 
 the "all" category and no electron rates.
 
     python3 -m ml.evaluate --run /eos/user/j/jieun/ml/runs/B_conv \\
-        --pack /eos/user/j/jieun/ml/packed/dyll_ul16_v1 --split test
+        --pack /eos/user/j/jieun/ml/packed/dyll_ul16_v1 --split test \\
+        --ref-pack /eos/user/j/jieun/ml/packed/zmm_ul16_v1     # B_conv / B_mlp: see --ref-pack
     python3 -m ml.evaluate --run RUN --pack PACK --out OUT --efficiencies 0.9 0.99
 
 Writes <out>/eval_metrics.json and <out>/eval_predictions.npz (per track: score, label, pt,
@@ -36,7 +37,7 @@ import torch
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ml import packed  # noqa: E402
-from ml.metrics import pass_rate, summarise, threshold_at_efficiency  # noqa: E402
+from ml.metrics import pass_rate, run_pack, summarise, threshold_at_efficiency  # noqa: E402
 from ml.particlenet import TrackParticleNet  # noqa: E402
 from ml.train import EventDataset, collate, run_epoch  # noqa: E402
 
@@ -69,7 +70,8 @@ def main(argv=None):
     p.add_argument("--pack", required=True, help="pack to evaluate on (ml/pack.py)")
     p.add_argument("--split", default="test", choices=("train", "val", "test"))
     p.add_argument("--out", help="output folder (default <run>/eval/<pack name>_<split>)")
-    p.add_argument("--ref-pack", help="pack for the working points (default: the run's training pack)")
+    p.add_argument("--ref-pack", help="the run's training pack, for the working points (default: from "
+                   "its config.json; needed for runs whose config has a condor scratch path)")
     p.add_argument("--efficiencies", type=float, nargs="+", default=[0.90, 0.95, 0.99],
                    help="muon efficiencies of the working points (default 0.90 0.95 0.99)")
     p.add_argument("--e-angle", type=float, default=0.01, help="electron match: inner direction angle in rad")
@@ -96,7 +98,7 @@ def main(argv=None):
     os.makedirs(out, exist_ok=True)
 
     # working points on the run's own val split
-    ref_pack = args.ref_pack or config["pack"]["path"]
+    ref_pack = run_pack(config, args.ref_pack)
     ref = predict(model, packed.PackedSplit(os.path.join(ref_pack, "val")), cfg, norm, device, args)
     hi = ref["pt"] > pt_min
     cuts = {f"{e:g}": threshold_at_efficiency(ref["score"][hi], ref["label"][hi], e) for e in args.efficiencies}

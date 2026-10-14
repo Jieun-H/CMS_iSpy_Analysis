@@ -30,7 +30,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ml import baseline, packed  # noqa: E402
 from ml.metrics import (average_precision, bootstrap, pass_rate, roc_auc, roc_curve,  # noqa: E402
-                        threshold_at_efficiency)
+                        run_pack, threshold_at_efficiency)
 
 # reference palette, light mode (dataviz skill): categorical slots in fixed order
 SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948")
@@ -310,7 +310,7 @@ def main(argv=None):
         c = r["config"]["input_config"]
         if (c["pt_min"], c["match_tol"]) != (pt_min, match_tol):
             raise SystemExit(f"{r['name']}: labels differ (pt_min / match_tol), not comparable")
-    pack = args.pack or runs[0]["config"]["pack"]["path"]
+    pack = run_pack(runs[0]["config"], args.pack)
     split = packed.PackedSplit(os.path.join(pack, args.split))
     for r in runs:
         fill_eta(r["pred"], split)

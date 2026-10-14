@@ -125,6 +125,8 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     g = p.add_argument_group("data")
     g.add_argument("--pack", required=True, help="folder made by ml/pack.py")
+    g.add_argument("--pack-origin", help="where the pack really lives when --pack is a local copy "
+                   "(condor jobs copy it to scratch); recorded for ml/evaluate.py and ml/report.py")
     g.add_argument("--out", required=True, help="run folder (created; one per experiment)")
     g.add_argument("--task", choices=("track", "event"), default="track",
                    help="track: is this track a muon (default); event: has_muon")
@@ -231,7 +233,8 @@ def main(argv=None):
         "track_scalars": packed.track_scalar_names(cfg.track_features),
         "normalisation": norm.to_json(), "model": model_kw, "n_parameters": n_param,
         "pos_weight": pos_weight, "train_events": int(len(train_idx)),
-        "pack": {"path": os.path.abspath(args.pack), "git": pack_info.get("git"),
+        "pack": {"path": os.path.abspath(args.pack_origin or args.pack), "read_from": os.path.abspath(args.pack),
+                 "git": pack_info.get("git"),
                  "created": pack_info.get("created"), "summary": pack_info.get("summary"),
                  "split_seed": pack_info.get("seed")},
     }

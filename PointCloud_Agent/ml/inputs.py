@@ -4,11 +4,13 @@ Point-cloud npz (agent/pointcloud.py) -> model inputs, track by track.
 track_id / muon_id are only list positions inside one ig collection. They are used here
 to group the 33 Bezier points of each track and are then dropped, and the track order
 in each event is shuffled, so neither the id nor a track's position in the array tells
-the model anything. Same for ECAL hits, muon segments and RPC hits (detid and the
+the model anything. Same for calorimeter hits, muon segments and RPC hits (detid and the
 chamber numbers are dropped, the order is shuffled).
 
-Inputs   all tracks (tracks key: trackExtrapolator, pT > 1 GeV) + ECAL EB/EE hits
-         + CSC/DT segments + RPC hits. Segments and RPC hits are local measurements in
+Inputs   all tracks (tracks key: trackExtrapolator, pT > 1 GeV) + calorimeter hits
+         (ECAL EB/EE, HCAL HB/HE/HF/HO; choose with hit_keys=...) + CSC/DT segments + RPC hits.
+         AOD keeps only the HCAL hits around reconstructed objects (reducedHcalRecHits),
+         so HB/HE/HO are mostly empty; HF is filled in every event. Segments and RPC hits are local measurements in
          the muon system, made before (and independent of) muon reconstruction.
          Reconstructed physics objects (elec_tracks, muon_tracks, global_muon,
          standalone_muon) and muon_chambers (only chambers matched to a reco muon)
@@ -19,6 +21,7 @@ Label    has_muon: at least one global muon above pt_min, taken from global_muon
     batch = collate([ds[i] for i in range(8)])
     batch["track_points"]   # (B, T, 33, 3)  x,y,z along each track, inner -> outer
     batch["track_mask"]     # (B, T) True where a real track is
+    batch["hit_feats"]      # (B, H, 5)  x,y,z,energy,time; hit_det = index into hit_keys
     batch["seg_feats"]      # (B, S, 6)  segment end points x1,y1,z1,x2,y2,z2; seg_det 0=CSC 1=DT
     batch["rpc_feats"]      # (B, R, 3)  RPC hit x,y,z
 """
@@ -26,8 +29,10 @@ import numpy as np
 
 TRACK_POINT_FEATURES = ("x", "y", "z")                  # per point, in Bezier order
 TRACK_FEATURES = ("pt",)                                # per track
-HIT_FEATURES = ("x", "y", "z", "energy", "time")       # per ECAL hit (eta, phi follow from x, y, z)
-HIT_KEYS = ("ecal_eb", "ecal_ee")                       # hit_det = position in this tuple
+HIT_FEATURES = ("x", "y", "z", "energy", "time")       # per hit (eta, phi follow from x, y, z)
+# Default hit_keys; hit_det = position in the hit_keys used. ECAL points are on the crystal
+# front face, HCAL points at the cell centre (agent/pointcloud.py).
+HIT_KEYS = ("ecal_eb", "ecal_ee", "hcal_hb", "hcal_he", "hcal_hf", "hcal_ho")
 SEG_FEATURES = ("x1", "y1", "z1", "x2", "y2", "z2")     # per segment
 SEG_KEYS = ("csc_segments", "dt_segments")              # seg_det = position in this tuple
 RPC_FEATURES = ("x", "y", "z")                          # per RPC hit
@@ -38,6 +43,8 @@ _DEFAULT_COLUMNS = {
     "global_muon": ["x", "y", "z", "pt", "muon_id"],
     "ecal_eb": ["x", "y", "z", "energy", "eta", "phi", "time", "detid"],
     "ecal_ee": ["x", "y", "z", "energy", "eta", "phi", "time", "detid"],
+    **{k: ["x", "y", "z", "energy", "eta", "phi", "time", "detid"]
+       for k in ("hcal_hb", "hcal_he", "hcal_hf", "hcal_ho")},
     "csc_segments": ["x1", "y1", "z1", "x2", "y2", "z2", "endcap", "station", "ring", "chamber", "detid"],
     "dt_segments": ["x1", "y1", "z1", "x2", "y2", "z2", "wheel", "station", "sector", "detid"],
     "rpc_hits": ["x", "y", "z", "region", "station", "sector", "layer", "detid"],
@@ -91,9 +98,9 @@ def _stack(npz, keys, features):
     return np.concatenate(feats), np.concatenate(det)
 
 
-def hits(npz):
-    """-> features (H, len(HIT_FEATURES)) float32, detector (H,) int64 (index into HIT_KEYS)"""
-    return _stack(npz, HIT_KEYS, HIT_FEATURES)
+def hits(npz, keys=HIT_KEYS):
+    """-> features (H, len(HIT_FEATURES)) float32, detector (H,) int64 (index into keys)"""
+    return _stack(npz, keys, HIT_FEATURES)
 
 
 def segments(npz):
@@ -113,11 +120,12 @@ def muons(npz, pt_min):
     return pts[pts > pt_min]
 
 
-def event(path, rng=None, pt_min=10.0):
-    """One npz -> dict of inputs and label. rng: shuffle tracks and hits (None keeps file order)."""
+def event(path, rng=None, pt_min=10.0, hit_keys=HIT_KEYS):
+    """One npz -> dict of inputs and label. rng: shuffle tracks and hits (None keeps file order).
+    hit_keys: calorimeter parts to use, e.g. ("ecal_eb", "ecal_ee") for ECAL only."""
     with np.load(path) as npz:
         track_points, track_feats = tracks(npz)
-        hit_feats, hit_det = hits(npz)
+        hit_feats, hit_det = hits(npz, hit_keys)
         seg_feats, seg_det = segments(npz)
         rpc_feats = rpc_hits(npz)
         muon_pt = muons(npz, pt_min)
@@ -146,17 +154,18 @@ class NpzEventDataset:
     worker its own seed (worker_init_fn) so the workers do not repeat the same order.
     """
 
-    def __init__(self, paths, seed=None, shuffle=True, pt_min=10.0):
+    def __init__(self, paths, seed=None, shuffle=True, pt_min=10.0, hit_keys=HIT_KEYS):
         self.paths = sorted(str(p) for p in paths)
         self.rng = np.random.default_rng(seed)
         self.shuffle = shuffle
         self.pt_min = pt_min
+        self.hit_keys = tuple(hit_keys)
 
     def __len__(self):
         return len(self.paths)
 
     def __getitem__(self, i):
-        return event(self.paths[i], self.rng if self.shuffle else None, self.pt_min)
+        return event(self.paths[i], self.rng if self.shuffle else None, self.pt_min, self.hit_keys)
 
 
 def _pad(arrays, fill=0):

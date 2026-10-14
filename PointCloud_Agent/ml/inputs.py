@@ -24,6 +24,8 @@ Label    has_muon: at least one global muon above pt_min, taken from global_muon
     ds = NpzEventDataset(glob.glob("out/*/pointcloud/Run_*/*.npz"), seed=0)
     batch = collate([ds[i] for i in range(8)])
     batch["track_points"]   # (B, T, 33, 3)  x,y,z along each track, inner -> outer
+    batch["track_feats"]    # (B, T, F)  track_features (default pt only; eta, phi, charge,
+                            #            chi2, ndof come from track_info)
     batch["track_mask"]     # (B, T) True where a real track is
     batch["hit_feats"]      # (B, H, 5)  x,y,z,energy,time; hit_det = index into hit_keys
     batch["seg_feats"]      # (B, S, 6)  segment end points x1,y1,z1,x2,y2,z2; seg_det 0=CSC 1=DT
@@ -33,7 +35,10 @@ Label    has_muon: at least one global muon above pt_min, taken from global_muon
 import numpy as np
 
 TRACK_POINT_FEATURES = ("x", "y", "z")                  # per point, in Bezier order
-TRACK_FEATURES = ("pt",)                                # per track
+TRACK_FEATURES = ("pt",)                                # per track (default)
+# Per-track features that can be chosen (track_features=...): pt from tracks, the rest from
+# track_info (row i = track_id i). chi2 / ndof carry the electron brem signature.
+TRACK_INFO_FEATURES = ("pt", "eta", "phi", "charge", "chi2", "ndof")
 HIT_FEATURES = ("x", "y", "z", "energy", "time")       # per hit (eta, phi follow from x, y, z)
 # Default hit_keys; hit_det = position in the hit_keys used. ECAL points are on the crystal
 # front face, HCAL points at the cell centre (agent/pointcloud.py).
@@ -48,6 +53,8 @@ _DEFAULT_COLUMNS = {
     "tracks": ["x", "y", "z", "pt", "track_id"],
     "global_muon": ["x", "y", "z", "pt", "muon_id"],
     "muon_tracks": ["x", "y", "z", "pt", "track_id"],
+    "elec_tracks": ["x", "y", "z", "pt", "track_id"],
+    "track_info": ["pt", "eta", "phi", "charge", "chi2", "ndof", "track_id"],
     "ecal_eb": ["x", "y", "z", "energy", "eta", "phi", "time", "detid"],
     "ecal_ee": ["x", "y", "z", "energy", "eta", "phi", "time", "detid"],
     **{k: ["x", "y", "z", "energy", "eta", "phi", "time", "detid"]
@@ -80,18 +87,33 @@ def _group_by_id(arr, id_col):
     return np.split(arr[order], starts[1:]) if len(uniq) else []
 
 
-def tracks(npz, key="tracks"):
-    """-> points (T, 33, 3) float32, features (T, len(TRACK_FEATURES)) float32"""
+def tracks(npz, key="tracks", features=TRACK_FEATURES):
+    """-> points (T, 33, 3) float32, features (T, len(features)) float32.
+    A feature not among the key's columns is looked up in track_info by track_id."""
     arr, c = _array(npz, key)
     groups = _group_by_id(arr, c["track_id"])
     bad = [len(g) for g in groups if len(g) != POINTS_PER_TRACK]
     if bad:
         raise ValueError(f"tracks with {sorted(set(bad))} points, expected {POINTS_PER_TRACK}")
     p_cols = [c[f] for f in TRACK_POINT_FEATURES]
-    f_cols = [c[f] for f in TRACK_FEATURES]
     points = np.array([g[:, p_cols] for g in groups], dtype=np.float32).reshape(
         -1, POINTS_PER_TRACK, len(p_cols))
-    feats = np.array([g[0, f_cols] for g in groups], dtype=np.float32).reshape(-1, len(f_cols))
+    ids = np.array([g[0, c["track_id"]] for g in groups], dtype=np.int64)
+    feats = np.zeros((len(groups), len(features)), dtype=np.float32)
+    info = None
+    for j, f in enumerate(features):
+        if f in c:
+            feats[:, j] = [g[0, c[f]] for g in groups]
+            continue
+        if info is None:
+            info, ic = _array(npz, "track_info")
+            rows = {int(t): i for i, t in enumerate(info[:, ic["track_id"]])}
+            missing = [int(t) for t in ids if int(t) not in rows]
+            if missing:
+                raise ValueError(f"{len(missing)} tracks have no track_info row "
+                                 f"(npz made before track_info? remake with --steps pointcloud)")
+            sel = info[[rows[int(t)] for t in ids]] if len(ids) else info[:0]
+        feats[:, j] = sel[:, ic[f]]
     return points, feats
 
 
@@ -147,12 +169,14 @@ def track_labels(npz, track_points, pt_min, tol=MATCH_TOL):
     return dist < tol
 
 
-def event(path, rng=None, pt_min=10.0, hit_keys=HIT_KEYS, match_tol=MATCH_TOL):
+def event(path, rng=None, pt_min=10.0, hit_keys=HIT_KEYS, match_tol=MATCH_TOL,
+          track_features=TRACK_FEATURES):
     """One npz -> dict of inputs and label. rng: shuffle tracks and hits (None keeps file order).
     hit_keys: calorimeter parts to use, e.g. ("ecal_eb", "ecal_ee") for ECAL only.
-    match_tol: end-point distance (m) for track_is_muon."""
+    match_tol: end-point distance (m) for track_is_muon.
+    track_features: per-track columns of track_feats, any of TRACK_INFO_FEATURES."""
     with np.load(path) as npz:
-        track_points, track_feats = tracks(npz)
+        track_points, track_feats = tracks(npz, "tracks", track_features)
         track_is_muon = track_labels(npz, track_points, pt_min, match_tol)
         hit_feats, hit_det = hits(npz, hit_keys)
         seg_feats, seg_det = segments(npz)
@@ -185,20 +209,21 @@ class NpzEventDataset:
     """
 
     def __init__(self, paths, seed=None, shuffle=True, pt_min=10.0, hit_keys=HIT_KEYS,
-                 match_tol=MATCH_TOL):
+                 match_tol=MATCH_TOL, track_features=TRACK_FEATURES):
         self.paths = sorted(str(p) for p in paths)
         self.rng = np.random.default_rng(seed)
         self.shuffle = shuffle
         self.pt_min = pt_min
         self.hit_keys = tuple(hit_keys)
         self.match_tol = match_tol
+        self.track_features = tuple(track_features)
 
     def __len__(self):
         return len(self.paths)
 
     def __getitem__(self, i):
         return event(self.paths[i], self.rng if self.shuffle else None, self.pt_min, self.hit_keys,
-                     self.match_tol)
+                     self.match_tol, self.track_features)
 
 
 def _pad(arrays, fill=0):

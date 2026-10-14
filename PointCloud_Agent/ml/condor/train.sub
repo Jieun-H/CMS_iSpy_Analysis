@@ -1,0 +1,18 @@
+# Train on a GPU batch node. Run from the PointCloud_Agent folder:
+#   condor_submit ml/condor/train.sub pack=/eos/user/j/jieun/ml/packed/zmm_ul16_v1 \
+#       runs=/eos/user/j/jieun/ml/runs name=B_conv
+#   condor_submit ml/condor/train.sub pack=... runs=... name=B_mlp "args=--track-encoder mlp"
+# Each name is its own run folder <runs>/<name>; resubmitting the same name resumes from
+# last.pt. Optional: lcg=<LCG view folder with CUDA torch>, flavour=<JobFlavour>.
+executable  = ml/condor/train.sh
+arguments   = "$ENV(PWD) $(pack) $(runs)/$(name) $(args:)"
+environment = "LCG_VIEW=$(lcg:/cvmfs/sft.cern.ch/lcg/views/LCG_107_cuda/x86_64-el9-gcc11-opt)"
+output      = ml/condor/logs/train.$(name).$(ClusterId).out
+error       = ml/condor/logs/train.$(name).$(ClusterId).err
+log         = ml/condor/logs/train.$(name).$(ClusterId).log
+request_gpus   = 1
+request_cpus   = 4
+request_memory = 16 GB
+request_disk   = 6 GB
++JobFlavour = "$(flavour:workday)"
+queue

@@ -1,0 +1,16 @@
+# Pack npz on a CPU batch node. Run from the PointCloud_Agent folder:
+#   condor_submit ml/condor/pack.sub \
+#       targets=/eos/user/j/jieun/PointCloud_Agent_output/ZToMuMu_UL16_train \
+#       pack=/eos/user/j/jieun/ml/packed/zmm_ul16_v1
+# Optional: "args=--split 0.7 0.15 0.15 --seed 0", lcg=<LCG view folder>, flavour=<JobFlavour>
+executable  = ml/condor/pack.sh
+arguments   = "$ENV(PWD) $(pack) $(targets) $(args:)"
+environment = "LCG_VIEW=$(lcg:/cvmfs/sft.cern.ch/lcg/views/LCG_107_cuda/x86_64-el9-gcc11-opt)"
+output      = ml/condor/logs/pack.$(ClusterId).out
+error       = ml/condor/logs/pack.$(ClusterId).err
+log         = ml/condor/logs/pack.$(ClusterId).log
+request_cpus   = 1
+request_memory = 4 GB
+request_disk   = 6 GB
++JobFlavour = "$(flavour:workday)"
+queue

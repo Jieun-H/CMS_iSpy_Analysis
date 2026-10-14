@@ -42,8 +42,9 @@ PointCloud_Agent로 만든 CMS 점구름(npz)을 머신러닝에 쓰기 위한 �
 | GlobalTag | `106X_mcRun2_asymptotic_v13` (UL16 postVFP) |
 | CMSSW | `/afs/cern.ch/user/j/jieun/CMSSW_10_6_30` (ISpy `cmssw10` 브랜치, GEM 패치 적용) |
 
-**미확인**: 2만 개 생성이 끝났다는 말만 들었고, npz 개수 / 중복 경고 / `has_muon` 비율은 아직 확인 안 함.
-학습 전에 확인할 것 (lxplus, 깨끗한 셸, PointCloud_Agent 폴더에서):
+**검증 완료 (2026-10-14)**: npz 20,000개 모두 읽힘, 오류 0, 중복 (run, lumi, event) 0, manifest 20,000 = 요청 20,000.
+결과 JSON: `/eos/user/j/jieun/zmm_train_check.json`. 수치는 7절. 새 샘플도 같은 방법으로 확인
+(lxplus, 깨끗한 셸, PointCloud_Agent 폴더에서):
 ```bash
 grep -c "duplicate event" /eos/user/j/jieun/zmm_train.log        # 0 이어야 함
 python3 -m ml.check_dataset /eos/user/j/jieun/PointCloud_Agent_output/ZToMuMu_UL16_train --json /eos/user/j/jieun/zmm_train_check.json
@@ -130,24 +131,30 @@ batch = collate([ds[i] for i in range(8)])     # torch: DataLoader(ds, collate_f
 - **트랙 단위 라벨 `track_is_muon`** (`ml/inputs.py`, npz 재생성 불필요): `tracks`와 `muon_tracks`는 둘 다
   Extras_V1의 pos_1/pos_2를 지나는 Bezier라서, 같은 트랙이면 양 끝점이 일치함. 두 끝점 거리 중 큰 값이
   `match_tol`(기본 1e-3 m, 실행 시 선택) 미만이면 매칭. 장점: μμ 샘플 하나로 학습 가능, 샘플 간 차이 문제 없음.
-  - 2012 AOD(DoubleElectron) 25개: tracker muon 20개 중 18개가 거리 정확히 0. 나머지 2개는 pT 0.83/1.41 GeV
-    (`tracks`의 pT > 1 GeV 선택 등으로 빠진 것으로 보임).
-  - 미니AOD ig에서는 압축 때문에 ~1e-4 m 차이 (참고용; 학습 데이터는 AOD).
-  - **UL16 2만 개에서 아직 확인 안 함** → `ml/check_dataset.py`의 `track_is_muon` 줄로 확인.
+  - **UL16 2만 개에서 확인**: pT > 10 tracker muon 26,372개 중 25,899개가 거리 ≤ 1e-6 m (사실상 0),
+    1e-6~1e-3 m는 2개뿐 → 1e-3 m 기준은 간격이 뚜렷해 적절. 매칭 안 된 471개(1.8%)는 대부분 0.1 m 이상 떨어져
+    있어 해당 트랙이 `tracks`(quality 선택 + pT > 1 GeV)에 없는 경우로 보임.
+  - 라벨 트랙 25,900개 / 전체 트랙 약 208만 개 = **약 1.2%** → 학습 시 클래스 불균형 처리, 평가는 ROC/PR.
   - 기준은 tracker muon, 이벤트 라벨 `has_muon`은 global muon이라 개수가 다를 수 있음 (check_dataset이 셈).
 
 ## 7. 측정된 데이터 통계 (UL16 Z→μμ)
 
 | 항목 | 값 | 출처 |
 |---|---|---|
-| 트랙 수 | 이벤트당 약 20~200 | 100개 테스트 로그 |
-| `csc_segments` | 98/100 이벤트, 평균 9.2 | 100개 테스트 |
-| `dt_segments` | 76/100 이벤트, 평균 4.0 | 100개 테스트 |
-| `rpc_hits` | 100/100 이벤트, 평균 9.9 | 100개 테스트 |
-| `hcal_hb` | 28/1000 이벤트, 평균 0.2 | 2만 개 중 1000개 |
-| `hcal_he` | 223/1000 이벤트, 평균 1.3 | 2만 개 중 1000개 |
-| `hcal_hf` | 1000/1000 이벤트, 평균 219 | 2만 개 중 1000개 |
-| `hcal_ho` | 0/1000 | 2만 개 중 1000개 |
+출처: 2만 개 전체 `ml/check_dataset.py` (좌표 검증만 100개 테스트).
+
+| 항목 | 값 |
+|---|---|
+| `has_muon` (global muon pT > 10) | 16,223/20,000 = **0.811**. n_muons 0: 3,777 / 1: 6,911 / 2: 9,258 / 3: 54 |
+| 트랙 수 | 이벤트당 평균 104.1, 중앙값 98, p99 241, 최대 391 |
+| 칼로리미터 hit 전체 (6종) | 평균 353.4, p99 858, 최대 1,452 |
+| `ecal_eb` / `ecal_ee` | 이벤트당 평균 20.7 / 117.4 |
+| `hcal_hb` / `hcal_he` / `hcal_hf` / `hcal_ho` | 이벤트당 평균 0.2 / 1.3 / 213.8 / 0.0 |
+| `csc_segments` | 19,474 이벤트에 있음, 평균 8.7, p99 26, 최대 54 |
+| `dt_segments` | 15,800 이벤트, 평균 3.7, p99 16, 최대 87 |
+| `rpc_hits` | 19,964 이벤트, 평균 10.2, p99 22, 최대 33 |
+| tracker muon (pT > 10) | 26,372개, 그중 `tracks`와 매칭 25,901개 (98.2%) |
+| 트랙 라벨 수 ≠ global muon 수인 이벤트 | 516 (2.6%) |
 | 좌표 검증 | CSC \|z\| 5.80~10.46, DT r 4.14, HF \|z\| ≈ 12.0, RPC r 3.56~7.08 (m) | 검출기 위치와 일치 |
 
 ## 8. 물리적 한계 (논문에 명시할 것)
@@ -184,7 +191,7 @@ batch = collate([ds[i] for i in range(8)])     # torch: DataLoader(ds, collate_f
 | 로컬 (WSL) | Python 3.12, numpy 2.5, **torch 없음**. GitHub SSH 키 없음 → push는 사용자가 직접 |
 | lxplus | Python 3.9, numpy 2.0.2, plotly 설치됨. **AFS 홈 2GB 거의 가득** → 큰 파일은 EOS에 |
 | lxplus 셸 | 에이전트·pip은 `cmsenv` 안 한 깨끗한 셸에서 (섞이면 `GLIBCXX` 오류) |
-| 학습 장소 | **미정**. lxplus 로그인 노드에서 장시간 학습 금지 → HTCondor GPU, CERN SWAN, 또는 로컬 GPU |
+| 학습 장소 | **lxplus HTCondor GPU** (데이터가 EOS에 있음). 짧은 확인은 `lxplus-gpu.cern.ch`. 로그인 노드에서 장시간 학습 금지 |
 
 ## 11. 데이터 생성 명령 (참고)
 
@@ -207,11 +214,53 @@ python3 run_agent.py <DAS dataset> --name <출력 이름> --nevents 20000 --nfil
 
 ## 13. 남은 일
 
-1. 2만 개 생성 결과 검증: 위 `ml/check_dataset.py` 실행 (npz 개수, 중복, `has_muon` 비율, 트랙 매칭).
-2. 학습 장소 결정 (GPU 환경).
+1. ~~2만 개 생성 결과 검증~~ 완료 (3절, 7절).
+2. ~~학습 장소 결정~~ lxplus HTCondor GPU (14절).
 3. 둘 중 하나로 시작:
    - DY→ee 샘플 찾기·생성 → 이벤트 단위 학습 (μμ vs ee).
    - 트랙 단위 학습 (μμ만으로 가능). 라벨 `track_is_muon`은 준비됨 (UL16에서 매칭 확인 필요).
 4. 정규화 방식 결정 (좌표 m 단위, 에너지·pT는 로그 스케일 등).
-5. ParticleNet 구현, 이어서 ParT 비교.
+5. ~~ParticleNet 구현~~ 코드 완료 (14절), lxplus에서 첫 학습 필요. 이어서 ParT 비교.
 6. eμ 테스트 샘플 확보.
+
+## 14. 학습 코드 (ParticleNet)
+
+로컬에서는 옛 npz와 임의로 만든 입력으로 **실행만** 확인함 (CPU torch). 실제 수치는 lxplus에서.
+
+| 파일 | 역할 |
+|---|---|
+| `ml/pack.py` | npz → train/val/test 묶음 (`<pack>/<split>/*.bin` + `meta.json`, `pack.json`). numpy만, Python 3.9 |
+| `ml/packed.py` | 묶음 읽기, 특징 변환, 정규화(train 합계에서), 패딩 |
+| `ml/particlenet.py` | 트랙 인코더(`conv` 1D Conv / `mlp` 끝점·방향 12개) → 노드 종류 임베딩 → EdgeConv 3블록 → 트랙별/이벤트별 출력 |
+| `ml/train.py` | 학습·검증·테스트, 체크포인트, 지표 |
+| `ml/condor/pack.sub`, `pack.sh` | condor CPU 작업으로 묶기 (scratch에 쓰고 xrdcp로 EOS에 복사) |
+| `ml/condor/train.sub`, `train.sh` | condor GPU 작업으로 학습 (묶음을 scratch로 복사, 결과는 EOS에 바로 씀) |
+
+설계:
+- **묶음은 모든 것을 담고, 실험 설정은 학습 때 옵션으로 고름.** 트랙 변수 6개 전부, 칼로리미터 6종 전부,
+  트랙마다 가장 가까운 tracker muon까지 거리와 그 pT, 이벤트마다 global muon pT (최대 4개)를 저장.
+  `--hit-keys`, `--track-features`, `--pt-min`, `--match-tol`, `--segments/--no-segments`, `--rpc/--no-rpc`를 바꿔도 다시 묶을 필요 없음.
+- 정규화: train 분할에서 칼로리미터 종류별로 합을 저장, 학습 때 고른 `hit_keys`만 합쳐 평균·표준편차 계산.
+- 변환: pT → log, φ → sin/cos, χ² · ndof → log1p, 에너지 → log, segment → 중점 + 단위 방향.
+- 첫 EdgeConv의 kNN은 (η, φ)에서 φ를 2π로 감아 계산 (트랙은 바깥 끝점, 나머지는 hit 위치).
+  이후 블록은 학습된 특징 공간에서. 패딩 노드는 이웃이 되지 않음.
+- `--task track` (기본): 트랙마다 `track_is_muon`. `--task event`: `has_muon`.
+- 검증 지표: AUC, AP. track task는 pT > `pt_min` 트랙만의 `auc_pt`/`ap_pt`도 계산하고, best는 `auc_pt`로 고름
+  (pT < `pt_min` 트랙은 정의상 음성이라 전체 AUC는 과대평가됨).
+- 체크포인트(`last.pt`, `best.pt`): 가중치, optimizer·scheduler·scaler 상태, 옵션 전체, 입력 설정, 정규화 값,
+  묶음 정보, git commit, epoch별 지표, 분할 목록. 같은 `name`으로 다시 제출하면 `last.pt`에서 이어 학습.
+
+실행 (lxplus, PointCloud_Agent 폴더):
+```bash
+# 1) 묶기 (한 번)
+condor_submit ml/condor/pack.sub targets=/eos/user/j/jieun/PointCloud_Agent_output/ZToMuMu_UL16_train pack=/eos/user/j/jieun/ml/packed/zmm_ul16_v1
+# 2) 학습: 설정마다 name 하나
+condor_submit ml/condor/train.sub pack=/eos/user/j/jieun/ml/packed/zmm_ul16_v1 runs=/eos/user/j/jieun/ml/runs name=B_conv
+condor_submit ml/condor/train.sub pack=... runs=... name=B_mlp "args=--track-encoder mlp"
+condor_submit ml/condor/train.sub pack=... runs=... name=A_conv "args=--hit-keys ecal_eb ecal_ee"
+```
+- LCG view 기본값: 묶기·학습 모두 `LCG_107_cuda` (`x86_64-el9-gcc11-opt`, Python 3.11.9, torch 2.5.1, numpy 1.26.4).
+  lxplus에서 확인된 cuda view: `LCG_105_cuda` (3.9.12, torch 2.1.0a0), `LCG_106_cuda` (3.11.9, torch 2.3.1), `LCG_107_cuda`.
+  다른 view는 `lcg=<폴더>`로 고름. 코드는 torch 2.1(Python 3.9, numpy 1.23)과 2.14에서 로컬 실행 확인.
+- 로그: `ml/condor/logs/` (AFS, 작음). 결과: `<runs>/<name>/` (EOS).
+- GPU 메모리가 부족하면 `"args=--batch-size 16"`.

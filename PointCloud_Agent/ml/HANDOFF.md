@@ -314,3 +314,9 @@ python3 -m ml.evaluate --run /eos/user/j/jieun/ml/runs/B_conv --pack /eos/user/j
   `ml.evaluate --ref-pack ...`로 `/eos/user/j/jieun/ml/packed/zmm_ul16_v1`을 직접 줄 것.
 - 계획: ZToMuMu로 학습한 `B_conv`를 DYJetsToLL_M-50(UL16, 디스크에 있으면)에 적용 → ee 이벤트의 고 pT 전자 오판율로
   pT·isolation 지름길 여부 확인. 고질량 DYToMuMu/DYToEE(M-120To200 등)는 UL16에서 모두 테이프에만 있음.
+
+### 그림 선택 (`ml/report.py --plots`)
+- 기본: `roc learning_curves scores vs_pt vs_eta`. 한 칸짜리: `roc_all`(전체 효율 범위 ROC), `loss`, `val_auc`.
+- 색: 파랑 = 첫 모델 / 뮤온 트랙 / train, 빨강 = 두 번째 모델 / 비뮤온 트랙 / validation. 기준선은 그 외 색.
+- 점수 분포는 반투명 면 채우기.
+- 2026-10-18: MLP는 이후 제외하고 Conv만 진행하기로 함.

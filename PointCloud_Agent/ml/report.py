@@ -7,6 +7,7 @@ Everything is for tracks with pT > pt_min (the tracks a muon label can exist for
 
     roc.png             muon efficiency vs non-muon pass rate (log), models and baselines
     learning_curves.png train / val loss and val auc_pt per epoch
+    roc_all.png, loss.png, val_auc.png  single-panel versions (choose figures with --plots)
     scores.png          model score for muon and non-muon tracks
     vs_pt.png, vs_eta.png  muon efficiency and non-muon pass rate per bin at one working point
     summary.md / .json  auc_pt (+- bootstrap over events), ap_pt, pass rate at fixed efficiencies
@@ -33,8 +34,11 @@ from ml.metrics import (average_precision, bootstrap, pass_rate, roc_auc, roc_cu
                         run_pack, threshold_at_efficiency)
 
 # reference palette, light mode (dataviz skill): categorical slots in fixed order
-SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948")
+SERIES = ("#2a78d6", "#e34948", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#eb6834")
+BLUE, RED = SERIES[0], SERIES[1]
 SURFACE, INK, INK_2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
+PLOTS = ("roc", "roc_all", "learning_curves", "loss", "val_auc", "scores", "vs_pt", "vs_eta")
+DEFAULT_PLOTS = ("roc", "learning_curves", "scores", "vs_pt", "vs_eta")
 PT_BINS = (10, 15, 20, 30, 40, 50, 70, 100, 1e9)
 ETA_BINS = (0, 0.9, 1.2, 2.1, 2.4, 2.5)         # DT barrel / overlap / CSC endcap / edge
 
@@ -161,19 +165,51 @@ def write_evals(out, evals):
 
 # ---------------------------------------------------------------- figures
 
+def _roc_panel(ax, curves, lo, title):
+    # models take blue, red, ...; single variables start after the first two slots, so red
+    # never means a baseline (red is "non-muon" in the score plot)
+    n_model = 0
+    n_base = 0
+    for name, c in curves.items():
+        if c["kind"] == "model":
+            colour = SERIES[n_model % len(SERIES)]
+            n_model += 1
+        else:
+            colour = SERIES[2 + n_base % (len(SERIES) - 2)]
+            n_base += 1
+        tpr, fpr, _ = roc_curve(c["score"], c["label"])
+        keep = (fpr > 0) & (tpr >= lo)
+        ax.plot(tpr[keep], fpr[keep], color=colour,
+                linestyle="-" if c["kind"] == "model" else "--", label=name)
+    ax.set_yscale("log")
+    ax.set_xlim(lo, 1.0)
+    ax.set_xlabel("Muon track efficiency")
+    ax.set_ylabel("Non-muon tracks passing")
+    ax.set_title(title, loc="left")
+
+
+def _roc_legend(fig, ax, curves):
+    handles, labels = ax.get_legend_handles_labels()
+    title = "solid: model, dashed: single variable" if any(c["kind"] != "model" for c in curves.values()) else None
+    fig.legend(handles, labels, loc="lower center", ncol=min(len(labels), 4),
+               bbox_to_anchor=(0.5, -0.02), title=title)
+    return len(labels)
+
+
+def fig_roc_all(plt, curves, out, formats):
+    """Single panel: the whole efficiency range."""
+    fig, ax = plt.subplots(figsize=(6.4, 4.8))
+    _roc_panel(ax, curves, 0.0, "All efficiencies")
+    n = _roc_legend(fig, ax, curves)
+    fig.tight_layout(rect=(0, 0.10 + 0.06 * ((n - 1) // 4), 1, 1))
+    _save(fig, out, "roc_all", formats)
+    plt.close(fig)
+
+
 def fig_roc(plt, curves, out, formats):
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.4))
     for ax, (lo, title) in zip(axes, ((0.0, "All efficiencies"), (0.9, "High-efficiency region"))):
-        for i, (name, c) in enumerate(curves.items()):
-            tpr, fpr, _ = roc_curve(c["score"], c["label"])
-            keep = (fpr > 0) & (tpr >= lo)
-            ax.plot(tpr[keep], fpr[keep], color=SERIES[i % len(SERIES)],
-                    linestyle="-" if c["kind"] == "model" else "--", label=name)
-        ax.set_yscale("log")
-        ax.set_xlim(lo, 1.0)
-        ax.set_xlabel("Muon track efficiency")
-        ax.set_ylabel("Non-muon tracks passing")
-        ax.set_title(title, loc="left")
+        _roc_panel(ax, curves, lo, title)
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=min(len(labels), 4),
                bbox_to_anchor=(0.5, -0.02), title="solid: model, dashed: single variable")
@@ -182,41 +218,79 @@ def fig_roc(plt, curves, out, formats):
     plt.close(fig)
 
 
-def fig_learning(plt, runs, out, formats):
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
+def _loss_panel(ax, runs):
+    """One run: train blue, validation red. Several runs: one colour per run, train dashed."""
     for i, r in enumerate(runs):
         ep = [h["epoch"] for h in r["history"]]
-        col = SERIES[i % len(SERIES)]
-        axes[0].plot(ep, [h["train_loss"] for h in r["history"]], color=col, linestyle="--",
-                     label=f"{r['name']} train")
-        axes[0].plot(ep, [h["val_loss"] for h in r["history"]], color=col, label=f"{r['name']} val")
-        axes[1].plot(ep, [h.get("val_auc_pt") for h in r["history"]], color=col, marker="o",
-                     markersize=4, label=r["name"])
-    axes[0].set_yscale("log")
-    axes[0].set_xlabel("Epoch")
-    axes[0].set_ylabel("Loss per track")
-    axes[0].set_title("Loss", loc="left")
-    axes[0].legend()
-    axes[1].set_xlabel("Epoch")
-    axes[1].set_ylabel("Validation AUC (pT > pt_min)")
-    axes[1].set_title("Validation AUC", loc="left")
-    axes[1].legend()
+        single = len(runs) == 1
+        c_train, c_val = (BLUE, RED) if single else (SERIES[i % len(SERIES)],) * 2
+        prefix = "" if single else f"{r['name']} "
+        ax.plot(ep, [h["train_loss"] for h in r["history"]], color=c_train, linestyle="-" if single else "--",
+                label=f"{prefix}train")
+        ax.plot(ep, [h["val_loss"] for h in r["history"]], color=c_val, label=f"{prefix}validation")
+    ax.set_yscale("log")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss per track")
+    ax.set_title("Loss" + (f" ({runs[0]['name']})" if len(runs) == 1 else ""), loc="left")
+    ax.legend()
+
+
+def _auc_panel(ax, runs):
+    for i, r in enumerate(runs):
+        ep = [h["epoch"] for h in r["history"]]
+        ax.plot(ep, [h.get("val_auc_pt") for h in r["history"]], color=SERIES[i % len(SERIES)], marker="o",
+                markersize=4, label=r["name"])
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Validation AUC (pT > pt_min)")
+    ax.set_title("Validation AUC", loc="left")
+    if len(runs) > 1:
+        ax.legend()
+
+
+def _integer_epochs(axes):
     from matplotlib.ticker import MaxNLocator
     for ax in axes:
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+
+def fig_learning(plt, runs, out, formats):
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
+    _loss_panel(axes[0], runs)
+    _auc_panel(axes[1], runs)
+    _integer_epochs(axes)
     fig.tight_layout()
     _save(fig, out, "learning_curves", formats)
     plt.close(fig)
 
 
+def fig_loss(plt, runs, out, formats):
+    fig, ax = plt.subplots(figsize=(6.4, 4.4))
+    _loss_panel(ax, runs)
+    _integer_epochs([ax])
+    fig.tight_layout()
+    _save(fig, out, "loss", formats)
+    plt.close(fig)
+
+
+def fig_val_auc(plt, runs, out, formats):
+    fig, ax = plt.subplots(figsize=(6.4, 4.4))
+    _auc_panel(ax, runs)
+    _integer_epochs([ax])
+    fig.tight_layout()
+    _save(fig, out, "val_auc", formats)
+    plt.close(fig)
+
+
 def fig_scores(plt, runs, sel, out, formats):
-    fig, axes = plt.subplots(1, len(runs), figsize=(5.2 * len(runs), 4), squeeze=False)
+    fig, axes = plt.subplots(1, len(runs), figsize=(max(6.4, 5.2 * len(runs)), 4.4), squeeze=False)
     bins = np.linspace(0, 1, 51)
     for ax, r in zip(axes[0], runs):
         p = r["pred"]
         s, lab = p["score"][sel[r["name"]]], p["label"][sel[r["name"]]] > 0.5
-        ax.hist(s[lab], bins=bins, histtype="step", linewidth=1.6, color=SERIES[0], label="muon tracks")
-        ax.hist(s[~lab], bins=bins, histtype="step", linewidth=1.6, color=SERIES[1], label="non-muon tracks")
+        # filled, semi-transparent so the overlap stays visible
+        ax.hist(s[lab], bins=bins, histtype="stepfilled", alpha=0.5, linewidth=0, color=BLUE, label="muon tracks")
+        ax.hist(s[~lab], bins=bins, histtype="stepfilled", alpha=0.5, linewidth=0, color=RED,
+                label="non-muon tracks")
         ax.set_yscale("log")
         ax.set_xlabel("Model score")
         ax.set_ylabel("Tracks")
@@ -295,6 +369,9 @@ def main(argv=None):
     p.add_argument("--ecal-cone", type=float, default=0.1)
     p.add_argument("--evals", nargs="*", default=[], help="ml/evaluate.py output folders")
     p.add_argument("--formats", nargs="+", default=["png"], help="png, pdf, svg ...")
+    p.add_argument("--plots", nargs="+", choices=PLOTS, default=list(DEFAULT_PLOTS),
+                   help="figures to draw (default: %(default)s); roc_all, loss and val_auc are "
+                        "single-panel versions of roc and learning_curves")
     args = p.parse_args(argv)
 
     import matplotlib
@@ -340,11 +417,20 @@ def main(argv=None):
     write_summary(args.out, rows, args.efficiencies,
                   {"pack": pack, "split": args.split, "pt_min": pt_min, "tracks": first["tracks"],
                    "muons": first["muons"], "runs": {r["name"]: r["path"] for r in runs}})
-    fig_roc(plt, curves, args.out, args.formats)
-    fig_learning(plt, runs, args.out, args.formats)
-    fig_scores(plt, runs, sel, args.out, args.formats)
-    fig_binned(plt, runs, sel, args.wp, args.out, args.formats, "pt", PT_BINS, "Track pT [GeV]", "vs_pt")
-    fig_binned(plt, runs, sel, args.wp, args.out, args.formats, "eta", ETA_BINS, "Track |η|", "vs_eta")
+    draw = {
+        "roc": lambda: fig_roc(plt, curves, args.out, args.formats),
+        "roc_all": lambda: fig_roc_all(plt, curves, args.out, args.formats),
+        "learning_curves": lambda: fig_learning(plt, runs, args.out, args.formats),
+        "loss": lambda: fig_loss(plt, runs, args.out, args.formats),
+        "val_auc": lambda: fig_val_auc(plt, runs, args.out, args.formats),
+        "scores": lambda: fig_scores(plt, runs, sel, args.out, args.formats),
+        "vs_pt": lambda: fig_binned(plt, runs, sel, args.wp, args.out, args.formats, "pt", PT_BINS,
+                                    "Track pT [GeV]", "vs_pt"),
+        "vs_eta": lambda: fig_binned(plt, runs, sel, args.wp, args.out, args.formats, "eta", ETA_BINS,
+                                     "Track |η|", "vs_eta"),
+    }
+    for name in args.plots:
+        draw[name]()
     if args.evals:
         write_evals(args.out, args.evals)
     print(f"-> {args.out}")

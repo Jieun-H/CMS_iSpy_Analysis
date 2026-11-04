@@ -2,7 +2,6 @@
 
 PointCloud_Agent로 만든 CMS 점구름(npz)을 머신러닝에 쓰기 위한 정리입니다.
 데이터 생성 쪽 작업은 끝났고, 이 문서는 모델 학습을 시작하는 다음 작업을 위한 것입니다.
-기준 커밋: `5ee21d8` (2026-10-14).
 
 ---
 
@@ -188,7 +187,7 @@ batch = collate([ds[i] for i in range(8)])     # torch: DataLoader(ds, collate_f
 
 | 곳 | 상태 |
 |---|---|
-| 로컬 (WSL) | Python 3.12, numpy 2.5, **torch 없음**. GitHub SSH 키 없음 → push는 사용자가 직접 |
+| 로컬 (WSL) | Python 3.12, numpy 2.5, **torch 없음** |
 | lxplus | Python 3.9, numpy 2.0.2, plotly 설치됨. **AFS 홈 2GB 거의 가득** → 큰 파일은 EOS에 |
 | lxplus 셸 | 에이전트·pip은 `cmsenv` 안 한 깨끗한 셸에서 (섞이면 `GLIBCXX` 오류) |
 | 학습 장소 | **lxplus HTCondor GPU** (데이터가 EOS에 있음). 짧은 확인은 `lxplus-gpu.cern.ch`. 로그인 노드에서 장시간 학습 금지 |
@@ -210,7 +209,6 @@ python3 run_agent.py <DAS dataset> --name <출력 이름> --nevents 20000 --nfil
 
 - 설정은 코드 파일을 고치지 않고 **실행할 때 옵션으로** 고를 수 있게 만들 것 (예: `--html/--no-html`, `hit_keys=`).
 - 대화는 한국어.
-- 커밋은 사용자가 요청할 때. push는 로컬에 SSH 키가 없어 사용자가 직접 함.
 
 ## 13. 남은 일
 

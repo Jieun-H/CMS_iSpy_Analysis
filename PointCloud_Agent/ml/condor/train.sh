@@ -1,6 +1,6 @@
 #!/bin/bash
-# HTCondor job (GPU): train ParticleNet (ml/train.py).
-# args: CODE_DIR PACK RUN_OUT [ml.train options]
+# HTCondor job (GPU): train ParticleNet (ml/train_muon.py or ml/train_electron.py).
+# args: CODE_DIR PACK RUN_OUT [training options]; TRAIN_MODULE picks the script (default ml.train_muon)
 # The pack is copied from EOS to the job's scratch disk (fast reads every epoch); the run
 # folder (checkpoints, metrics) is written straight to EOS so a killed job keeps last.pt.
 set -euo pipefail
@@ -20,4 +20,6 @@ mkdir -p "$out"
 cd "$code"
 resume=""
 [ -f "$out/last.pt" ] && resume="--resume" && echo "found $out/last.pt, resuming"
-python3 -m ml.train --pack "$local_pack" --pack-origin "$pack" --out "$out" $resume "$@"
+module=${TRAIN_MODULE:-ml.train_muon}
+echo "training with $module"
+python3 -m "$module" --pack "$local_pack" --pack-origin "$pack" --out "$out" $resume "$@"

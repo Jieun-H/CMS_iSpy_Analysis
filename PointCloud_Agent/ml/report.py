@@ -3,13 +3,15 @@ Figures and tables for a presentation, from finished runs (ml/train.py), the sin
 baselines (ml/baseline.py, recomputed here on the same split) and, optionally, evaluations
 on other samples (ml/evaluate.py). numpy + matplotlib, no torch, no GPU.
 
-Everything is for tracks with pT > pt_min (the tracks a muon label can exist for).
+Everything is for tracks with pT > pt_min (the tracks a label can exist for). The runs'
+labelled particle (ml/train.py --particle, muon or electron) names the axes and tables;
+runs with different labels cannot be compared in one report.
 
-    roc.png             muon efficiency vs non-muon pass rate (log), models and baselines
+    roc.png             target efficiency vs non-target pass rate (log), models and baselines
     learning_curves.png train / val loss and val auc_pt per epoch
     roc_all.png, loss.png, val_auc.png  single-panel versions (choose figures with --plots)
-    scores.png          model score for muon and non-muon tracks
-    vs_pt.png, vs_eta.png  muon efficiency and non-muon pass rate per bin at one working point
+    scores.png          model score for target and non-target tracks
+    vs_pt.png, vs_eta.png  target efficiency and non-target pass rate per bin at one working point
     summary.md / .json  auc_pt (+- bootstrap over events), ap_pt, pass rate at fixed efficiencies
     evals.md            per sample / event category / working point (with --evals)
 
@@ -41,6 +43,8 @@ PLOTS = ("roc", "roc_all", "learning_curves", "loss", "val_auc", "scores", "vs_p
 DEFAULT_PLOTS = ("roc", "learning_curves", "scores", "vs_pt", "vs_eta")
 PT_BINS = (10, 15, 20, 30, 40, 50, 70, 100, 1e9)
 ETA_BINS = (0, 0.9, 1.2, 2.1, 2.4, 2.5)         # DT barrel / overlap / CSC endcap / edge
+LABEL_KEYS = ("particle", "pt_min", "match_tol", "e_angle", "e_d0")
+TARGET = "muon"                                 # the runs' labelled particle, set in main()
 
 
 def _style(plt):
@@ -87,8 +91,8 @@ def fill_eta(pred, split):
     return pred
 
 
-def baselines(split, names, pt_min, match_tol, cones):
-    args = argparse.Namespace(pt_min=pt_min, match_tol=match_tol, **cones)
+def baselines(split, names, label_cfg, cones):
+    args = argparse.Namespace(**label_cfg, **cones)
     labels, values, events = [], [], []
     for e in range(len(split)):
         lab, val = baseline.event_variables(split.event(e), args)
@@ -109,13 +113,13 @@ def baselines(split, names, pt_min, match_tol, cones):
 
 def score_summary(score, label, event, efficiencies, n_boot):
     label = np.asarray(label).astype(bool)
-    row = {"tracks": int(len(label)), "muons": int(label.sum()),
+    row = {"tracks": int(len(label)), "positives": int(label.sum()),
            "auc_pt": roc_auc(score, label), "ap_pt": average_precision(score, label),
            "auc_pt_err": bootstrap(lambda i: roc_auc(score[i], label[i]), event, n_boot) if n_boot else None,
-           "non_muon_pass": {}}
+           "negative_pass": {}}
     for e in efficiencies:
         cut = threshold_at_efficiency(score, label, e)
-        row["non_muon_pass"][f"{e:g}"] = None if cut is None else pass_rate(score, ~label, cut)["rate"]
+        row["negative_pass"][f"{e:g}"] = None if cut is None else pass_rate(score, ~label, cut)["rate"]
     return row
 
 
@@ -126,38 +130,49 @@ def _fmt(x, digits=4):
 def write_summary(out, rows, efficiencies, meta):
     with open(os.path.join(out, "summary.json"), "w") as f:
         json.dump({"meta": meta, "rows": rows}, f, indent=2)
-    head = ["", "kind", "auc_pt", "ap_pt"] + [f"non-muon pass @ eff {e:g}" for e in efficiencies]
+    head = ["", "kind", "auc_pt", "ap_pt"] + [f"non-{TARGET} pass @ eff {e:g}" for e in efficiencies]
     lines = [f"Tracks with pT > {meta['pt_min']:g} GeV in {meta['pack']} [{meta['split']}]: "
-             f"{meta['tracks']} tracks, {meta['muons']} muons "
-             f"(muon fraction {meta['muons'] / max(meta['tracks'], 1):.3f} = ap_pt of a random score).",
+             f"{meta['tracks']} tracks, {meta['positives']} {TARGET}s "
+             f"({TARGET} fraction {meta['positives'] / max(meta['tracks'], 1):.3f} = ap_pt of a random score).",
              "", "| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for name, r in rows.items():
         auc = _fmt(r["auc_pt"]) + (f" ± {r['auc_pt_err']:.4f}" if r["auc_pt_err"] else "")
         lines.append("| " + " | ".join([name, r["kind"], auc, _fmt(r["ap_pt"])]
-                                       + [_fmt(r["non_muon_pass"][f"{e:g}"]) for e in efficiencies]) + " |")
+                                       + [_fmt(r["negative_pass"][f"{e:g}"]) for e in efficiencies]) + " |")
     lines += ["", "auc_pt error: std over bootstrap resamplings of whole events.",
-              "non-muon pass: fraction of non-muon tracks above the cut that keeps that muon efficiency "
+              f"non-{TARGET} pass: fraction of non-{TARGET} tracks above the cut that keeps that {TARGET} efficiency "
               "(cut set on this split itself)."]
     with open(os.path.join(out, "summary.md"), "w") as f:
         f.write("\n".join(lines) + "\n")
     print("\n".join(lines))
 
 
+def _eval_rates(wp):
+    """(target eff, muon pass, electron pass, other pass) from an eval working point; evals made
+    before electron runs have muon_efficiency / electron_fake_rate / other_fake_rate."""
+    if "efficiency" in wp:
+        return wp["efficiency"], wp["muon_pass"], wp["electron_pass"], wp["other_pass"]
+    return wp["muon_efficiency"], wp["muon_efficiency"], wp["electron_fake_rate"], wp["other_fake_rate"]
+
+
 def write_evals(out, evals):
-    lines = ["| sample | category | events | muons | electrons | others | WP eff | muon eff | e pass | other pass |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+    lines = ["| sample | run label | category | events | muons | electrons | others | WP eff | eff | "
+             "muon pass | e pass | other pass |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for path in evals:
         with open(os.path.join(path, "eval_metrics.json")) as f:
             m = json.load(f)
         sample = f"{os.path.basename(m['pack'])} [{m['split']}]"
+        particle = m.get("particle", "muon")
         for cat, row in m["categories"].items():
             for e, wp in row["working_points"].items():
+                rates = _eval_rates(wp)
                 lines.append("| " + " | ".join([
-                    sample, cat, str(row["events"]), str(row["muons"]), str(row["electrons"]),
-                    str(row["others"]), e, _fmt(wp["muon_efficiency"]["rate"]),
-                    _fmt(wp["electron_fake_rate"]["rate"]), _fmt(wp["other_fake_rate"]["rate"])]) + " |")
-    lines += ["", "Working points: score cuts keeping that muon efficiency on the training pack's val split. "
-              "e pass / other pass: fraction of electron / other non-muon tracks above the cut."]
+                    sample, particle, cat, str(row["events"]), str(row["muons"]), str(row["electrons"]),
+                    str(row["others"]), e] + [_fmt(r["rate"]) for r in rates]) + " |")
+    lines += ["", "Working points: score cuts keeping that efficiency of the run's labelled particle (run "
+              "label) on the training pack's val split. eff: that particle's tracks above the cut; muon / "
+              "e / other pass: fraction of muon / electron / other tracks above the cut."]
     with open(os.path.join(out, "evals.md"), "w") as f:
         f.write("\n".join(lines) + "\n")
     print("\n".join(lines))
@@ -167,7 +182,7 @@ def write_evals(out, evals):
 
 def _roc_panel(ax, curves, lo, title):
     # models take blue, red, ...; single variables start after the first two slots, so red
-    # never means a baseline (red is "non-muon" in the score plot)
+    # never means a baseline (red is "non-target" in the score plot)
     n_model = 0
     n_base = 0
     for name, c in curves.items():
@@ -183,8 +198,8 @@ def _roc_panel(ax, curves, lo, title):
                 linestyle="-" if c["kind"] == "model" else "--", label=name)
     ax.set_yscale("log")
     ax.set_xlim(lo, 1.0)
-    ax.set_xlabel("Muon track efficiency")
-    ax.set_ylabel("Non-muon tracks passing")
+    ax.set_xlabel(f"{TARGET.capitalize()} track efficiency")
+    ax.set_ylabel(f"Non-{TARGET} tracks passing")
     ax.set_title(title, loc="left")
 
 
@@ -288,9 +303,9 @@ def fig_scores(plt, runs, sel, out, formats):
         p = r["pred"]
         s, lab = p["score"][sel[r["name"]]], p["label"][sel[r["name"]]] > 0.5
         # filled, semi-transparent so the overlap stays visible
-        ax.hist(s[lab], bins=bins, histtype="stepfilled", alpha=0.5, linewidth=0, color=BLUE, label="muon tracks")
+        ax.hist(s[lab], bins=bins, histtype="stepfilled", alpha=0.5, linewidth=0, color=BLUE, label=f"{TARGET} tracks")
         ax.hist(s[~lab], bins=bins, histtype="stepfilled", alpha=0.5, linewidth=0, color=RED,
-                label="non-muon tracks")
+                label=f"non-{TARGET} tracks")
         ax.set_yscale("log")
         ax.set_xlabel("Model score")
         ax.set_ylabel("Tracks")
@@ -336,11 +351,11 @@ def fig_binned(plt, runs, sel, wp, out, formats, var, edges, xlabel, name):
             low = np.minimum(err, 0.9 * y) if k == 1 else err      # keep the log axis finite
             ax.errorbar(centres + off, y, yerr=[low, err], color=SERIES[i % len(SERIES)], marker="o",
                         markersize=5, linewidth=1.6, capsize=2, label=r["name"])
-    axes[0].set_ylabel("Muon track efficiency")
-    axes[0].set_title(f"Muon efficiency (cut for {wp:.0%} overall)", loc="left")
-    axes[1].set_ylabel("Non-muon tracks passing")
+    axes[0].set_ylabel(f"{TARGET.capitalize()} track efficiency")
+    axes[0].set_title(f"{TARGET.capitalize()} efficiency (cut for {wp:.0%} overall)", loc="left")
+    axes[1].set_ylabel(f"Non-{TARGET} tracks passing")
     axes[1].set_yscale("log")
-    axes[1].set_title("Non-muon pass rate", loc="left")
+    axes[1].set_title(f"Non-{TARGET} pass rate", loc="left")
     for ax in axes:
         ax.set_xticks(centres)
         ax.set_xticklabels(ticks, rotation=30, ha="right", rotation_mode="anchor")
@@ -362,7 +377,7 @@ def main(argv=None):
     p.add_argument("--baselines", nargs="*", default=["pt", "iso_rel", "n_seg", "n_rpc", "ecal_e"],
                    choices=baseline.VARIABLES, help="single-variable baselines to show")
     p.add_argument("--efficiencies", type=float, nargs="+", default=[0.90, 0.95, 0.99])
-    p.add_argument("--wp", type=float, default=0.99, help="muon efficiency for vs_pt / vs_eta (default 0.99)")
+    p.add_argument("--wp", type=float, default=0.99, help="target efficiency for vs_pt / vs_eta (default 0.99)")
     p.add_argument("--bootstrap", type=int, default=200, help="event resamplings for errors (0: none)")
     p.add_argument("--iso-cone", type=float, default=0.3)
     p.add_argument("--muon-cone", type=float, default=0.3)
@@ -380,13 +395,16 @@ def main(argv=None):
     _style(plt)
     os.makedirs(args.out, exist_ok=True)
 
+    global TARGET
     runs = [load_run(s) for s in args.runs]
-    cfg0 = runs[0]["config"]["input_config"]
-    pt_min, match_tol = cfg0["pt_min"], cfg0["match_tol"]
-    for r in runs[1:]:
-        c = r["config"]["input_config"]
-        if (c["pt_min"], c["match_tol"]) != (pt_min, match_tol):
-            raise SystemExit(f"{r['name']}: labels differ (pt_min / match_tol), not comparable")
+    # runs made before --particle are muon runs with the default electron cuts
+    label_cfgs = [{k: packed.InputConfig(**r["config"]["input_config"]).to_json()[k] for k in LABEL_KEYS}
+                  for r in runs]
+    label_cfg = label_cfgs[0]
+    for r, c in zip(runs[1:], label_cfgs[1:]):
+        if c != label_cfg:
+            raise SystemExit(f"{r['name']}: labels differ ({', '.join(LABEL_KEYS)}), not comparable")
+    TARGET, pt_min = label_cfg["particle"], label_cfg["pt_min"]
     pack = run_pack(runs[0]["config"], args.pack)
     split = packed.PackedSplit(os.path.join(pack, args.split))
     for r in runs:
@@ -402,21 +420,21 @@ def main(argv=None):
                                                              pr["event"][s], args.efficiencies, args.bootstrap))
     if args.baselines:
         cones = {"iso_cone": args.iso_cone, "muon_cone": args.muon_cone, "ecal_cone": args.ecal_cone}
-        base = baselines(split, args.baselines, pt_min, match_tol, cones)
-        n_model = rows[runs[0]["name"]]["muons"]
+        base = baselines(split, args.baselines, label_cfg, cones)
+        n_model = rows[runs[0]["name"]]["positives"]
         for v, b in base.items():
             name = f"{v} only"
             curves[name] = {"score": b["score"], "label": b["label"], "kind": "baseline"}
             rows[name] = dict(kind="baseline", **score_summary(b["score"], b["label"], b["event"],
                                                                args.efficiencies, args.bootstrap))
         if int(base[args.baselines[0]]["label"].sum()) != n_model:
-            print(f"WARNING: baseline muons {int(base[args.baselines[0]]['label'].sum())} != "
-                  f"model muons {n_model} (different split or limit?)", file=sys.stderr)
+            print(f"WARNING: baseline {TARGET}s {int(base[args.baselines[0]]['label'].sum())} != "
+                  f"model {TARGET}s {n_model} (different split or limit?)", file=sys.stderr)
 
     first = rows[runs[0]["name"]]
     write_summary(args.out, rows, args.efficiencies,
-                  {"pack": pack, "split": args.split, "pt_min": pt_min, "tracks": first["tracks"],
-                   "muons": first["muons"], "runs": {r["name"]: r["path"] for r in runs}})
+                  {"pack": pack, "split": args.split, **label_cfg, "tracks": first["tracks"],
+                   "positives": first["positives"], "runs": {r["name"]: r["path"] for r in runs}})
     draw = {
         "roc": lambda: fig_roc(plt, curves, args.out, args.formats),
         "roc_all": lambda: fig_roc_all(plt, curves, args.out, args.formats),

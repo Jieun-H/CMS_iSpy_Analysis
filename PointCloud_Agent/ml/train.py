@@ -1,8 +1,10 @@
 """
-Train ParticleNet (ml/particlenet.py) on a pack made by ml/pack.py.
+Train ParticleNet (ml/particlenet.py) on a pack made by ml/pack.py: the shared training loop
+of ml/train_muon.py and ml/train_electron.py (use those; they fix --particle).
 
 Every choice is a command-line option (nothing to edit): task, track encoder, track
-features, calorimeter parts, muon-system inputs, label pt_min / match_tol, model size,
+features, calorimeter parts, muon-system inputs, labelled particle (muon / electron) and
+its label cuts (pt_min, match_tol, e_angle, e_d0), model size,
 optimiser, train fraction (learning curve). Each run writes to its own --out folder:
 
     config.json          all options, input config, normalisation, pack info, git commit
@@ -19,6 +21,9 @@ optimiser, train fraction (learning curve). Each run writes to its own --out fol
     python3 -m ml.train --pack PACK --out RUN --no-segments --no-rpc
     python3 -m ml.train --pack PACK --out RUN --train-fraction 0.1
     python3 -m ml.train --pack PACK --out RUN --task event        # has_muon per event
+    # electron vs non-electron per track (pack with electron arrays, e.g. DYJetsToLL)
+    python3 -m ml.train --pack PACK --out RUN --particle electron --e-angle 0.01 --e-d0 0.005
+    python3 -m ml.train --pack PACK --out RUN --particle electron --hit-keys   # no calorimeter
     # continue a stopped run (same --out)
     python3 -m ml.train --pack PACK --out RUN --resume
     # quick check that everything runs (CPU, few batches)
@@ -92,7 +97,7 @@ def run_epoch(model, loader, device, task, pos_weight, optimiser=None, scaler=No
             m = b["track_mask"]
             lg, lb = logit[m], b["track_label"][m]
         else:
-            lg, lb = logit, b["has_muon"]
+            lg, lb = logit, b["event_label"]
         loss = loss_fn(lg, lb)
         n = max(len(lb), 1)
         if train:
@@ -129,7 +134,10 @@ def main(argv=None):
                    "(condor jobs copy it to scratch); recorded for ml/evaluate.py and ml/report.py")
     g.add_argument("--out", required=True, help="run folder (created; one per experiment)")
     g.add_argument("--task", choices=("track", "event"), default="track",
-                   help="track: is this track a muon (default); event: has_muon")
+                   help="track: is this track the particle (default); event: does the event have one")
+    g.add_argument("--particle", choices=packed.PARTICLES, default="muon",
+                   help="muon: tracker muon match (default); electron: GSF electron match (needs a pack "
+                        "with electron arrays)")
     g.add_argument("--track-features", nargs="+", default=list(inputs.TRACK_INFO_FEATURES),
                    choices=inputs.TRACK_INFO_FEATURES, help="per-track scalars (default all)")
     g.add_argument("--hit-keys", nargs="*", default=["ecal_eb", "ecal_ee", "hcal_hb", "hcal_he"],
@@ -139,9 +147,13 @@ def main(argv=None):
     g.add_argument("--rpc", action=argparse.BooleanOptionalAction, default=True,
                    help="RPC hits as nodes (default on)")
     g.add_argument("--max-hits", type=int, default=None, help="keep only the N highest-energy hits")
-    g.add_argument("--pt-min", type=float, default=10.0, help="muon pT for the labels (default 10)")
+    g.add_argument("--pt-min", type=float, default=10.0, help="muon / electron pT for the labels (default 10)")
     g.add_argument("--match-tol", type=float, default=inputs.MATCH_TOL,
                    help=f"track <-> tracker muon distance in m (default {inputs.MATCH_TOL:g})")
+    g.add_argument("--e-angle", type=float, default=packed.E_ANGLE,
+                   help=f"electron label: inner direction angle in rad (default {packed.E_ANGLE:g}, provisional)")
+    g.add_argument("--e-d0", type=float, default=packed.E_D0,
+                   help=f"electron label: inner point distance in m (default {packed.E_D0:g}, provisional)")
     g.add_argument("--train-fraction", type=float, default=1.0, help="use this fraction of train")
     g = p.add_argument_group("model")
     g.add_argument("--track-encoder", choices=("conv", "mlp"), default="conv")
@@ -180,9 +192,12 @@ def main(argv=None):
     with open(os.path.join(args.pack, "pack.json")) as f:
         pack_info = json.load(f)
     cfg = packed.InputConfig(args.track_features, args.hit_keys, args.segments, args.rpc,
-                             args.pt_min, args.match_tol, args.max_hits)
+                             args.pt_min, args.match_tol, args.max_hits,
+                             args.particle, args.e_angle, args.e_d0)
     norm = packed.Normalizer(pack_info["stats"], cfg)
     splits = {s: packed.PackedSplit(os.path.join(args.pack, s)) for s in ("train", "val", "test")}
+    if cfg.particle == "electron" and not splits["train"].has_electrons:
+        raise SystemExit(f"{args.pack} has no electron arrays (made before them); pack it again for --particle electron")
 
     train_idx = np.arange(len(splits["train"]))
     if args.train_fraction < 1:
@@ -191,11 +206,10 @@ def main(argv=None):
 
     if args.pos_weight == "auto":
         tr = splits["train"]
-        if args.task == "track":
-            lab = (np.asarray(tr.array("track_mu_dist")) < cfg.match_tol) & \
-                  (np.asarray(tr.array("track_mu_pt")) > cfg.pt_min)
-        else:
-            lab = (np.asarray(tr.array("glb_pt")) > cfg.pt_min).any(1)
+        names = (("track_mu_dist", "track_mu_pt", "track_e_angle", "track_e_d0", "track_e_pt")
+                 if args.task == "track" else ("glb_pt", "ele_pt"))
+        arrays = {n: np.asarray(tr.array(n)) for n in names if n in tr.meta["arrays"]}
+        lab = cfg.track_label(arrays) if args.task == "track" else cfg.event_label(arrays)
         pos_weight = float((~lab).sum() / max(lab.sum(), 1))
     else:
         pos_weight = float(args.pos_weight)
@@ -255,7 +269,7 @@ def main(argv=None):
     with open(os.path.join(args.out, "config.json"), "w") as f:
         json.dump(config, f, indent=2)
     log(f"train {len(train_idx)} / val {len(splits['val'])} / test {len(splits['test'])} events, "
-        f"{n_param:,} parameters, pos_weight {pos_weight:.3g}, nodes {cfg.node_types}")
+        f"{n_param:,} parameters, pos_weight {pos_weight:.3g}, label {cfg.particle}, nodes {cfg.node_types}")
 
     key = "auc_pt" if args.task == "track" else "auc"
 

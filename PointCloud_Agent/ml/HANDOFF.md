@@ -238,7 +238,7 @@ python3 run_agent.py <DAS dataset> --name <출력 이름> --nevents 20000 --nfil
 | `ml/evaluate.py` | 학습된 run을 다른 묶음에 적용. 작동점(뮤온 효율 90/95/99%)은 run 자신의 val에서 정하고, 이벤트 종류(mumu/ee/emu/other)별 뮤온 효율·전자 오판율·기타 오판율 |
 | `ml/report.py` | 발표용 그림과 표: ROC(기준선 포함), 학습 곡선, 점수 분포, pT·\|η\|별 효율·오판율, summary.md, evals.md. matplotlib만 (LCG view) |
 | `ml/condor/pack.sub`, `pack.sh` | condor CPU 작업으로 묶기 (scratch에 쓰고 xrdcp로 EOS에 복사) |
-| `ml/condor/train.sub`, `train.sh` | condor GPU 작업으로 학습 (묶음을 scratch로 복사, 결과는 EOS에 바로 씀) |
+| `ml/condor/train_muon.sub`, `train_electron.sub`, `train.sh` | condor GPU 작업으로 학습 (묶음을 scratch로 복사, 결과는 EOS에 바로 씀). 2026-11-04 전에는 `train.sub` 하나였음 (= `train_muon.sub`) |
 
 설계:
 - **묶음은 모든 것을 담고, 실험 설정은 학습 때 옵션으로 고름.** 트랙 변수 6개 전부, 칼로리미터 6종 전부,
@@ -259,9 +259,9 @@ python3 run_agent.py <DAS dataset> --name <출력 이름> --nevents 20000 --nfil
 # 1) 묶기 (한 번)
 condor_submit ml/condor/pack.sub targets=/eos/user/j/jieun/PointCloud_Agent_output/ZToMuMu_UL16_train pack=/eos/user/j/jieun/ml/packed/zmm_ul16_v1
 # 2) 학습: 설정마다 name 하나
-condor_submit ml/condor/train.sub pack=/eos/user/j/jieun/ml/packed/zmm_ul16_v1 runs=/eos/user/j/jieun/ml/runs name=B_conv
-condor_submit ml/condor/train.sub pack=... runs=... name=B_mlp "args=--track-encoder mlp"
-condor_submit ml/condor/train.sub pack=... runs=... name=A_conv "args=--hit-keys ecal_eb ecal_ee"
+condor_submit ml/condor/train_muon.sub pack=/eos/user/j/jieun/ml/packed/zmm_ul16_v1 runs=/eos/user/j/jieun/ml/runs name=B_conv
+condor_submit ml/condor/train_muon.sub pack=... runs=... name=B_mlp "args=--track-encoder mlp"
+condor_submit ml/condor/train_muon.sub pack=... runs=... name=A_conv "args=--hit-keys ecal_eb ecal_ee"
 ```
 - LCG view 기본값: 묶기·학습 모두 `LCG_107_cuda` (`x86_64-el9-gcc11-opt`, Python 3.11.9, torch 2.5.1, numpy 1.26.4).
   lxplus에서 확인된 cuda view: `LCG_105_cuda` (3.9.12, torch 2.1.0a0), `LCG_106_cuda` (3.11.9, torch 2.3.1), `LCG_107_cuda`.
@@ -320,3 +320,58 @@ python3 -m ml.evaluate --run /eos/user/j/jieun/ml/runs/B_conv --pack /eos/user/j
 - 색: 파랑 = 첫 모델 / 뮤온 트랙 / train, 빨강 = 두 번째 모델 / 비뮤온 트랙 / validation. 기준선은 그 외 색.
 - 점수 분포는 반투명 면 채우기.
 - 2026-10-18: MLP는 이후 제외하고 Conv만 진행하기로 함.
+
+## 15. 전자 학습 (2026-11-04 추가)
+
+뮤온과 같은 방식으로 트랙마다 "GSF 전자인가"를 학습. 공통 코드(묶음, 모델, 학습 루프, 지표)는 그대로 쓰고,
+실행 파일만 나눔.
+
+| 파일 | 역할 |
+|---|---|
+| `ml/train_muon.py` | 뮤온 라벨 학습 (= `ml/train.py --particle muon`). 지금까지의 `python3 -m ml.train`과 같음 |
+| `ml/train_electron.py` | 전자 라벨 학습 (= `ml/train.py --particle electron`) |
+| `ml/electron_match.py` | 전자 매칭 각도·d0 분포와 전자당 라벨 트랙 수 → `--e-angle`, `--e-d0` 정하기. numpy만 |
+| `ml/condor/train_muon.sub`, `train_electron.sub` | 각 학습의 condor 제출 파일 (실행 스크립트 `train.sh`는 공통, `TRAIN_MODULE`로 고름) |
+
+- **라벨** (`ml/packed.py`의 `is_muon_track`, `is_electron_track`, `InputConfig.particle`):
+  - 전자 = pT > `pt_min`인 GSF 전자와 안쪽 방향 각도 < `--e-angle`(rad), 안쪽 점 거리 < `--e-d0`(m), tracker muon과
+    매칭된 트랙(pT 무관)은 제외. 기본값 0.01 rad / 0.005 m는 **잠정값**.
+  - 이벤트 단위(`--task event`): pT > `pt_min`인 GSF 전자가 1개 이상.
+  - 묶음에 이미 있는 `track_e_*`, `ele_pt`로 계산 → **다시 묶을 필요 없음**. 단 `zmm_ul16_v1`처럼 전자 배열이 없는 옛 묶음은
+    전자 학습 불가 (오류로 알려줌).
+- **옛 결과와 호환**: 옛 체크포인트·config는 `particle` 없음 → muon으로 읽힘. 옛 `eval_metrics.json`도 `ml.report --evals`로 읽힘.
+- `ml/evaluate.py`: 뮤온·전자 run 모두. 작동점은 그 run의 입자 효율 기준. 출력 키가 `efficiency`, `muon_pass`, `electron_pass`,
+  `other_pass`로 바뀜 (이전: `muon_efficiency`, `electron_fake_rate`, `other_fake_rate`). `--e-angle/--e-d0` 기본값은 run의 값.
+- `ml/baseline.py --particle electron`: 기준선에 `e_over_p`(ECAL 에너지 / pT) 추가.
+- `ml/report.py`: 축·표 이름이 run의 입자를 따름. 라벨 설정(입자, pt_min, match_tol, e_angle, e_d0)이 다른 run은 한 보고서에 못 넣음.
+- `ml/pack.py` summary에 `electron_tracks_pt10`(기본 잠정 기준) 추가.
+- 로컬 확인: 가짜 묶음(60 이벤트)으로 학습(트랙·이벤트, 이어 학습), evaluate, report, baseline, electron_match 실행만 확인
+  (CPU torch 2.15). 실제 수치는 lxplus에서.
+
+**물리적 주의 (논문에 명시)**: AOD의 `reducedEcalRecHits`는 재구성된 전자·광자 주변만 남김 → ECAL hit이 있다는 것 자체가
+"reco가 거기서 전자를 만들었다"는 정보. 뮤온보다 전자에서 훨씬 심한 정답 누출 위험. `--hit-keys`(칼로리미터 없음)와 비교할 것.
+GSF 전자에는 제트에서 온 가짜 전자도 섞여 있음 (npz에 전자 ID 없음) → 라벨은 "재구성된 GSF 전자".
+
+### 샘플 준비 (DYJetsToLL, lxplus 깨끗한 셸)
+- 데이터셋: `/DYJetsToLL_M-50_TuneCP5_13TeV-amcatnloFXFX-pythia8/RunIISummer20UL16RECO-106X_mcRun2_asymptotic_v13-v2/AODSIM`
+  (학습 샘플과 같은 postVFP·`v13`·CP5 pythia8. `RECOAPV`, `Pilot`, `PUForTRK`, `FlatPU` 캠페인은 조건이 달라 제외).
+  UL16 postVFP에는 ZToEE 전용 샘플 없음 (2026-11-04 DAS). `DYToEE_M-120To200`은 질량 범위가 달라 보조 시험용으로만.
+- ee 이벤트는 약 1/3 → 전자 통계는 이벤트 수의 약 1/3.
+```bash
+D=/DYJetsToLL_M-50_TuneCP5_13TeV-amcatnloFXFX-pythia8/RunIISummer20UL16RECO-106X_mcRun2_asymptotic_v13-v2/AODSIM
+dasgoclient -query="site dataset=$D"          # _Disk 또는 T2_* 필요
+dasgoclient -query="summary dataset=$D"       # nevents / nfiles → --nfiles
+python3 run_agent.py $D --name DYJetsToLL_UL16_train --nevents 20000 --nfiles <N> --per-ig 100 --no-html
+python3 -m ml.check_dataset /eos/user/j/jieun/PointCloud_Agent_output/DYJetsToLL_UL16_train --json /eos/user/j/jieun/dyll_train_check.json
+# 묶기: 학습에도 쓰므로 기본 70/15/15 (시험 전용이면 "args=--split 0 0 1")
+condor_submit ml/condor/pack.sub targets=/eos/user/j/jieun/PointCloud_Agent_output/DYJetsToLL_UL16_train pack=/eos/user/j/jieun/ml/packed/dyll_ul16_v1
+# 전자 기준 정하기 → 학습
+python3 -m ml.electron_match --pack /eos/user/j/jieun/ml/packed/dyll_ul16_v1
+condor_submit ml/condor/train_electron.sub pack=/eos/user/j/jieun/ml/packed/dyll_ul16_v1 runs=/eos/user/j/jieun/ml/runs name=E_B_conv "args=--e-angle <A> --e-d0 <D>"
+condor_submit ml/condor/train_electron.sub pack=... runs=... name=E_nocalo "args=--e-angle <A> --e-d0 <D> --hit-keys"
+# 뮤온 모델 일반화 시험 (같은 묶음의 test)
+python3 -m ml.evaluate --run /eos/user/j/jieun/ml/runs/B_conv --pack /eos/user/j/jieun/ml/packed/dyll_ul16_v1 --ref-pack /eos/user/j/jieun/ml/packed/zmm_ul16_v1 --e-angle <A> --e-d0 <D>
+```
+- `electron_match.py` 보는 법: 각도 분포에서 매칭 봉우리(작은 각도)와 나머지 사이에 빈 구간이 뚜렷한 곳에 기준을 둠.
+  전자당 라벨 트랙 수가 1보다 크게 넘으면 기준이 너무 느슨함, 크게 모자라면 너무 빡빡하거나 트랙이 `tracks`에 없음.
+- check_dataset의 segment 개수 분포를 Z→μμ와 비교 (6절: 개수만 보는 지름길 확인).

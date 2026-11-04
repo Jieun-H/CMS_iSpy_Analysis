@@ -3,19 +3,23 @@ Apply a trained run (ml/train.py) to any pack, e.g. a sample the model never saw
 DYJetsToLL, ttbar). The model uses its own input config and normalisation from the
 checkpoint, never the new pack's.
 
+Works for muon and electron runs (ml/train.py --particle); "target" below is that particle.
 Working points come from the training pack's val split (the run's own events): the score
-cuts that keep 90 / 95 / 99 % (--efficiencies) of the true muon tracks with pT > pt_min. On
-the target pack it then reports, per event category and per working point,
-    muon efficiency    muon-labelled tracks above the cut
-    electron fake rate tracks matched to a GSF electron (and not to a muon) above the cut
-    other fake rate    remaining tracks (hadrons, pileup) above the cut
-for tracks with pT > pt_min. Event categories from the reconstructed leptons above pt_min
-(used to split the result only, never as input): mumu (>= 2 muons, no electron),
-ee (>= 2 electrons, no muon), emu (>= 1 of each), other. A track counts as an electron
-when its inner direction is within --e-angle (rad) and its inner point within --e-d0 (m)
-of a GSF electron with pT > pt_min; these cuts are provisional, check them with the
-"electron match" lines on the real sample. Packs made before the electron arrays have only
-the "all" category and no electron rates.
+cuts that keep 90 / 95 / 99 % (--efficiencies) of the true target tracks with pT > pt_min.
+On the target pack it then reports, per event category and per working point, the
+fraction of tracks above the cut for
+    efficiency        target-labelled tracks (the run's own label)
+    muon pass         tracks matched to a tracker muon
+    electron pass     tracks matched to a GSF electron (and not to a muon)
+    other pass        remaining tracks (hadrons, pileup)
+for tracks with pT > pt_min (for a muon run, muon pass = efficiency, and the same for
+electrons). Event categories from the reconstructed leptons above pt_min (used to split
+the result only, never as input): mumu (>= 2 muons, no electron), ee (>= 2 electrons, no
+muon), emu (>= 1 of each), other. A track counts as an electron when its inner direction
+is within --e-angle (rad) and its inner point within --e-d0 (m) of a GSF electron with pT >
+pt_min (default: the run's own cuts for an electron run, else the provisional defaults);
+check them with ml/electron_match.py on the real sample. Packs made before the electron
+arrays have only the "all" category and no electron rates.
 
     python3 -m ml.evaluate --run /eos/user/j/jieun/ml/runs/B_conv \\
         --pack /eos/user/j/jieun/ml/packed/dyll_ul16_v1 --split test \\
@@ -23,7 +27,7 @@ the "all" category and no electron rates.
     python3 -m ml.evaluate --run RUN --pack PACK --out OUT --efficiencies 0.9 0.99
 
 Writes <out>/eval_metrics.json and <out>/eval_predictions.npz (per track: score, label, pt,
-eta, event, category, is_electron, e_angle, e_d0). Default out: <run>/eval/<pack>_<split>.
+eta, event, category, is_muon, is_electron, e_angle, e_d0). Default out: <run>/eval/<pack>_<split>.
 """
 import argparse
 import datetime
@@ -73,9 +77,11 @@ def main(argv=None):
     p.add_argument("--ref-pack", help="the run's training pack, for the working points (default: from "
                    "its config.json; needed for runs whose config has a condor scratch path)")
     p.add_argument("--efficiencies", type=float, nargs="+", default=[0.90, 0.95, 0.99],
-                   help="muon efficiencies of the working points (default 0.90 0.95 0.99)")
-    p.add_argument("--e-angle", type=float, default=0.01, help="electron match: inner direction angle in rad")
-    p.add_argument("--e-d0", type=float, default=0.005, help="electron match: inner point distance in m")
+                   help="target efficiencies of the working points (default 0.90 0.95 0.99)")
+    p.add_argument("--e-angle", type=float, default=None,
+                   help="electron match: inner direction angle in rad (default: the run's)")
+    p.add_argument("--e-d0", type=float, default=None,
+                   help="electron match: inner point distance in m (default: the run's)")
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--device", default="auto")
@@ -94,6 +100,8 @@ def main(argv=None):
     model = TrackParticleNet(**config["model"]).to(device)
     model.load_state_dict(ck["model"])
     pt_min = cfg.pt_min
+    e_angle_cut = cfg.e_angle if args.e_angle is None else args.e_angle
+    e_d0_cut = cfg.e_d0 if args.e_d0 is None else args.e_d0
     out = args.out or os.path.join(args.run, "eval", f"{os.path.basename(os.path.normpath(args.pack))}_{args.split}")
     os.makedirs(out, exist_ok=True)
 
@@ -107,28 +115,31 @@ def main(argv=None):
     split = packed.PackedSplit(os.path.join(args.pack, args.split))
     res = predict(model, split, cfg, norm, device, args)
     n = len(res["score"])
-    # per-track electron info from the pack, in prediction order (events in loader order,
+    # per-track lepton matches from the pack, in prediction order (events in loader order,
     # tracks in pack order; events without tracks have no rows)
     _, first = np.unique(res["event"], return_index=True)
     events = res["event"][np.sort(first)].astype(int)
-    cat_of, e_angle, e_d0, e_pt = {}, [], [], []
+    names = ("track_mu_dist", "track_mu_pt", "track_e_angle", "track_e_d0", "track_e_pt")
+    cat_of, tracks = {}, {k: [] for k in names}
     for e in events:
         raw = split.event(int(e))
         cat_of[int(e)] = event_category(raw, pt_min) if split.has_electrons else "other"
-        e_angle.append(raw["track_e_angle"])
-        e_d0.append(raw["track_e_d0"])
-        e_pt.append(raw["track_e_pt"])
-    e_angle, e_d0, e_pt = (np.concatenate(x)[:n] for x in (e_angle, e_d0, e_pt))
+        for k in names:
+            tracks[k].append(raw[k])
+    tracks = {k: np.concatenate(v)[:n] for k, v in tracks.items()}
+    e_angle, e_d0 = tracks["track_e_angle"], tracks["track_e_d0"]
     category = np.array([cat_of[int(e)] for e in res["event"]])
     label = res["label"] > 0.5
-    is_e = (~label) & (e_angle < args.e_angle) & (e_d0 < args.e_d0) & (e_pt > pt_min)
+    is_mu = packed.is_muon_track(tracks, pt_min, cfg.match_tol)
+    is_e = packed.is_electron_track(tracks, pt_min, cfg.match_tol, e_angle_cut, e_d0_cut)
+    is_other = ~is_mu & ~is_e
     hi = res["pt"] > pt_min
 
     metrics = {
         "created": datetime.datetime.now().isoformat(timespec="seconds"),
         "run": os.path.abspath(args.run), "checkpoint": args.checkpoint,
         "pack": os.path.abspath(args.pack), "split": args.split, "ref_pack": ref_pack,
-        "pt_min": pt_min, "e_angle": args.e_angle, "e_d0": args.e_d0,
+        "particle": cfg.particle, "pt_min": pt_min, "e_angle": e_angle_cut, "e_d0": e_d0_cut,
         "has_electron_info": split.has_electrons,
         "working_points": cuts,
         "all": summarise(res["score"], res["label"], res["pt"], pt_min, "track"),
@@ -138,21 +149,22 @@ def main(argv=None):
     for g in groups:
         sel = hi & (category == g if g != "all" else True)
         row = {"events": int(len(set(res["event"][category == g]))) if g != "all" else int(len(events)),
-               "tracks": int(sel.sum()), "muons": int((sel & label).sum()),
-               "electrons": int((sel & is_e).sum()), "others": int((sel & ~label & ~is_e).sum()),
+               "tracks": int(sel.sum()), "targets": int((sel & label).sum()), "muons": int((sel & is_mu).sum()),
+               "electrons": int((sel & is_e).sum()), "others": int((sel & is_other).sum()),
                "working_points": {}}
         for e, cut in cuts.items():
             if cut is None:
                 continue
             row["working_points"][e] = {
-                "muon_efficiency": pass_rate(res["score"], sel & label, cut),
-                "electron_fake_rate": pass_rate(res["score"], sel & is_e, cut),
-                "other_fake_rate": pass_rate(res["score"], sel & ~label & ~is_e, cut),
+                "efficiency": pass_rate(res["score"], sel & label, cut),
+                "muon_pass": pass_rate(res["score"], sel & is_mu, cut),
+                "electron_pass": pass_rate(res["score"], sel & is_e, cut),
+                "other_pass": pass_rate(res["score"], sel & is_other, cut),
             }
         metrics["categories"][g] = row
     if split.has_electrons:
         # how well the provisional electron cuts separate: tracks above pt_min in ee events
-        ee = hi & (category == "ee") & ~label & (e_pt > pt_min)
+        ee = hi & (category == "ee") & ~is_mu & (tracks["track_e_pt"] > pt_min)
         a = e_angle[ee & np.isfinite(e_angle)]
         metrics["electron_match"] = {
             "tracks_in_ee_events": int(ee.sum()),
@@ -162,20 +174,21 @@ def main(argv=None):
     with open(os.path.join(out, "eval_metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
     np.savez(os.path.join(out, "eval_predictions.npz"), score=res["score"], label=res["label"],
-             pt=res["pt"], eta=res["eta"], event=res["event"], category=category, is_electron=is_e,
+             pt=res["pt"], eta=res["eta"], event=res["event"], category=category, is_muon=is_mu, is_electron=is_e,
              e_angle=e_angle, e_d0=e_d0)
 
-    print(f"{args.pack} [{args.split}]: {len(events)} events, {int(hi.sum())} tracks with pT > {pt_min:g}")
+    print(f"{cfg.particle} run on {args.pack} [{args.split}]: {len(events)} events, "
+          f"{int(hi.sum())} tracks with pT > {pt_min:g}")
     print(f"working points from {ref_pack}/val: " + ", ".join(f"eff {e} -> cut {c:.4g}" for e, c in cuts.items() if c is not None))
     a = metrics["all"]
     print(f"auc_pt {a.get('auc_pt')}  ap_pt {a.get('ap_pt')}")
     for g, row in metrics["categories"].items():
-        print(f"[{g}] events {row['events']}, tracks {row['tracks']} (muons {row['muons']}, "
-              f"electrons {row['electrons']}, others {row['others']})")
+        print(f"[{g}] events {row['events']}, tracks {row['tracks']} ({cfg.particle}s {row['targets']}; "
+              f"muons {row['muons']}, electrons {row['electrons']}, others {row['others']})")
         for e, wp in row["working_points"].items():
             fmt = (lambda r: "  -   " if r["rate"] is None else f"{r['rate']:.4f}")
-            print(f"   eff {e}: muon eff {fmt(wp['muon_efficiency'])}  e fake {fmt(wp['electron_fake_rate'])}"
-                  f"  other fake {fmt(wp['other_fake_rate'])}")
+            print(f"   eff {e}: {cfg.particle} eff {fmt(wp['efficiency'])}  muon pass {fmt(wp['muon_pass'])}"
+                  f"  e pass {fmt(wp['electron_pass'])}  other pass {fmt(wp['other_pass'])}")
     if "electron_match" in metrics:
         print(f"electron match (ee events): {metrics['electron_match']}")
     print(f"-> {out}")

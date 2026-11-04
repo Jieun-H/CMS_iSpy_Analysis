@@ -75,20 +75,21 @@ def main(argv=None):
     summary = {}
     for name in SPLITS:
         writer = packed.SplitWriter(os.path.join(args.out, name))
-        n_tracks = n_labelled = 0
+        n_tracks = n_labelled = n_electron = 0
         for i, path in enumerate(splits[name]):
             raw = packed.read_raw(path)
             writer.add(path, raw)
             if name == "train":
                 stats.add_event(raw)
             n_tracks += int(raw["n_tracks"])
-            n_labelled += int(((raw["track_mu_dist"] < inputs.MATCH_TOL)
-                               & (raw["track_mu_pt"] > 10)).sum())
+            n_labelled += int(packed.is_muon_track(raw, 10.0, inputs.MATCH_TOL).sum())
+            n_electron += int(packed.is_electron_track(raw, 10.0, inputs.MATCH_TOL).sum())
             if (i + 1) % 2000 == 0:
                 print(f"  {name} {i + 1}/{len(splits[name])}", file=sys.stderr)
         writer.close({"split": name})
         summary[name] = {"events": len(splits[name]), "tracks": n_tracks,
-                         "muon_tracks_pt10": n_labelled}
+                         "muon_tracks_pt10": n_labelled,
+                         "electron_tracks_pt10": n_electron}       # default (provisional) e cuts
         print(f"{name}: {summary[name]}", file=sys.stderr)
 
     info = {

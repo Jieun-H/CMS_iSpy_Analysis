@@ -1,5 +1,6 @@
 """
-Single-variable baselines for the per-track muon label, on a pack made by ml/pack.py.
+Single-variable baselines for the per-track muon or electron label (--particle, the same
+labels as ml/train.py), on a pack made by ml/pack.py.
 
 A trained model is only interesting if it beats what one simple variable already gives.
 In Z -> mumu most high-pT tracks are the muons, so pT alone separates well; isolation and
@@ -13,10 +14,12 @@ Variables (cones in eta-phi, phi wrapped; all cone sizes are options):
     n_seg       CSC + DT segments within --muon-cone of the track direction
     n_rpc       RPC hits within --muon-cone of the track direction
     ecal_e      ECAL (EB + EE) energy within --ecal-cone of the track's outer end point
+    e_over_p    ecal_e / pT (the classic electron variable)
 
 numpy only (Python 3.9), no GPU:
     python3 -m ml.baseline --pack /eos/user/j/jieun/ml/packed/zmm_ul16_v1
     python3 -m ml.baseline --pack PACK --split val --pt-min 20 --muon-cone 0.2 --json base.json
+    python3 -m ml.baseline --pack PACK --particle electron --e-angle 0.01 --e-d0 0.005
 """
 import argparse
 import json
@@ -30,7 +33,7 @@ if __package__ in (None, ""):
 from ml import inputs, packed  # noqa: E402
 from ml.metrics import average_precision, roc_auc  # noqa: E402
 
-VARIABLES = ("pt", "abs_eta", "chi2_ndof", "ndof", "iso_rel", "n_seg", "n_rpc", "ecal_e")
+VARIABLES = ("pt", "abs_eta", "chi2_ndof", "ndof", "iso_rel", "n_seg", "n_rpc", "ecal_e", "e_over_p")
 
 
 def _dr2(a, b):
@@ -45,7 +48,10 @@ def event_variables(raw, args):
     info = raw["track_info"]
     c = {f: info[:, i] for i, f in enumerate(inputs.TRACK_INFO_FEATURES)}
     keep = c["pt"] > args.pt_min
-    label = ((raw["track_mu_dist"] < args.match_tol) & (raw["track_mu_pt"] > args.pt_min))[keep]
+    if getattr(args, "particle", "muon") == "electron":
+        label = packed.is_electron_track(raw, args.pt_min, args.match_tol, args.e_angle, args.e_d0)[keep]
+    else:
+        label = packed.is_muon_track(raw, args.pt_min, args.match_tol)[keep]
     if not keep.any():
         return label, np.zeros((0, len(VARIABLES)))
     direction = np.stack([c["eta"], c["phi"]], -1)
@@ -66,7 +72,8 @@ def event_variables(raw, args):
         if len(h) else 0
     cols = {"pt": pt[keep], "abs_eta": np.abs(c["eta"][keep]),
             "chi2_ndof": c["chi2"][keep] / np.maximum(c["ndof"][keep], 1), "ndof": c["ndof"][keep],
-            "iso_rel": iso / pt[keep], "n_seg": n_seg, "n_rpc": n_rpc, "ecal_e": ecal_e}
+            "iso_rel": iso / pt[keep], "n_seg": n_seg, "n_rpc": n_rpc, "ecal_e": ecal_e,
+            "e_over_p": ecal_e / pt[keep]}
     return label, np.stack([np.broadcast_to(np.asarray(cols[v], dtype=np.float64), label.shape)
                             for v in VARIABLES], -1)
 
@@ -76,7 +83,10 @@ def main(argv=None):
     p.add_argument("--pack", required=True, help="folder made by ml/pack.py")
     p.add_argument("--split", default="test", choices=("train", "val", "test"))
     p.add_argument("--pt-min", type=float, default=10.0, help="label pT and track selection (default 10)")
+    p.add_argument("--particle", choices=packed.PARTICLES, default="muon", help="label (default muon)")
     p.add_argument("--match-tol", type=float, default=inputs.MATCH_TOL, help="label match distance in m")
+    p.add_argument("--e-angle", type=float, default=packed.E_ANGLE, help="electron label: inner direction angle in rad")
+    p.add_argument("--e-d0", type=float, default=packed.E_D0, help="electron label: inner point distance in m")
     p.add_argument("--iso-cone", type=float, default=0.3, help="isolation cone (default 0.3)")
     p.add_argument("--muon-cone", type=float, default=0.3, help="segment / RPC cone (default 0.3)")
     p.add_argument("--ecal-cone", type=float, default=0.1, help="ECAL cone at the outer end point (default 0.1)")
@@ -85,6 +95,8 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     split = packed.PackedSplit(os.path.join(args.pack, args.split))
+    if args.particle == "electron" and not split.has_electrons:
+        raise SystemExit(f"{args.pack} has no electron arrays; pack it again for --particle electron")
     n = len(split) if args.max_events is None else min(args.max_events, len(split))
     labels, values = [], []
     for e in range(n):
@@ -94,14 +106,15 @@ def main(argv=None):
     label = np.concatenate(labels)
     value = np.concatenate(values)
 
-    result = {"split": args.split, "events": n, "tracks": int(len(label)), "muons": int(label.sum()),
-              "muon_fraction": float(label.mean()) if len(label) else None,
-              "options": {k: getattr(args, k) for k in ("pt_min", "match_tol", "iso_cone", "muon_cone",
-                                                         "ecal_cone")},
+    name = args.particle
+    result = {"split": args.split, "events": n, "tracks": int(len(label)), "particle": name,
+              "positives": int(label.sum()), "positive_fraction": float(label.mean()) if len(label) else None,
+              "options": {k: getattr(args, k) for k in ("particle", "pt_min", "match_tol", "e_angle", "e_d0",
+                                                         "iso_cone", "muon_cone", "ecal_cone")},
               "variables": {}}
     print(f"{args.split}: {n} events, {len(label)} tracks with pT > {args.pt_min:g}, "
-          f"{int(label.sum())} muons ({result['muon_fraction']:.3f} = AP of a random score)")
-    print(f"{'variable':10s} {'sign':>4s} {'auc':>6s} {'ap':>6s}   muon mean / other mean")
+          f"{int(label.sum())} {name}s ({result['positive_fraction']:.3f} = AP of a random score)")
+    print(f"{'variable':10s} {'sign':>4s} {'auc':>6s} {'ap':>6s}   {name} mean / other mean")
     for i, v in enumerate(VARIABLES):
         x = value[:, i]
         auc = roc_auc(x, label)
@@ -109,13 +122,13 @@ def main(argv=None):
         auc = roc_auc(sign * x, label)
         ap = average_precision(sign * x, label)
         result["variables"][v] = {"sign": sign, "auc": auc, "ap": ap,
-                                  "mean_muon": float(x[label].mean()) if label.any() else None,
+                                  "mean_positive": float(x[label].mean()) if label.any() else None,
                                   "mean_other": float(x[~label].mean()) if (~label).any() else None}
         r = result["variables"][v]
         fmt = (lambda y: "  none" if y is None else f"{y:6.3f}")
         fmt_mean = (lambda y: "none" if y is None else f"{y:.3g}")
         print(f"{v:10s} {'+' if sign > 0 else '-':>4s} {fmt(auc)} {fmt(ap)}   "
-              f"{fmt_mean(r['mean_muon'])} / {fmt_mean(r['mean_other'])}")
+              f"{fmt_mean(r['mean_positive'])} / {fmt_mean(r['mean_other'])}")
     if args.json:
         with open(args.json, "w") as f:
             json.dump(result, f, indent=2)

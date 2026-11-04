@@ -9,9 +9,10 @@ serves all experiments:
   - every calorimeter part in inputs.HIT_KEYS (choose with hit_keys at training),
   - per track: distance to the closest tracker muon and that muon's pT (label with any
     pt_min / match_tol at training), per event: global muon pTs (event label),
-  - evaluation only, never a model input: per track the angle (rad) between the track's
-    inner direction and the closest GSF electron's, the inner-point distance (m) and pT of
-    that electron; per event the GSF electron pTs (ee / mumu / emu event categories).
+  - labels and evaluation only, never a model input: per track the angle (rad) between the
+    track's inner direction and the closest GSF electron's, the inner-point distance (m) and
+    pT of that electron (electron label with any e_angle / e_d0 at training); per event the
+    GSF electron pTs (electron event label, ee / mumu / emu event categories).
     GSF tracks are refitted, so their end points do not coincide with the track's
     (unlike tracker muons); the direction at the inner point does. Packs made before this
     have no electron arrays; they read as "no electron information" (inf / 0).
@@ -42,6 +43,23 @@ PER_OBJECT = {                                  # array -> the per-event count t
 
 # arrays added after the first packs; an old pack reads them with these fills
 OPTIONAL = {"ele_pt": 0.0, "track_e_angle": np.inf, "track_e_d0": np.inf, "track_e_pt": 0.0}
+
+PARTICLES = ("muon", "electron")                # what the label marks (InputConfig.particle)
+E_ANGLE, E_D0 = 0.01, 0.005                     # electron match defaults (rad, m), provisional
+
+
+# ---------------------------------------------------------------- labels
+
+def is_muon_track(raw, pt_min, match_tol):
+    """Tracks whose end points coincide with a tracker muon above pt_min."""
+    return (raw["track_mu_dist"] < match_tol) & (raw["track_mu_pt"] > pt_min)
+
+
+def is_electron_track(raw, pt_min, match_tol, e_angle=E_ANGLE, e_d0=E_D0):
+    """Tracks whose inner direction is within e_angle (rad) and inner point within e_d0 (m) of
+    a GSF electron above pt_min, and that are not a tracker muon (any pT)."""
+    return ((raw["track_e_angle"] < e_angle) & (raw["track_e_d0"] < e_d0) & (raw["track_e_pt"] > pt_min)
+            & ~(raw["track_mu_dist"] < match_tol))
 
 
 # ---------------------------------------------------------------- reading npz (pack time)
@@ -280,7 +298,10 @@ class InputConfig:
 
     def __init__(self, track_features=inputs.TRACK_INFO_FEATURES,
                  hit_keys=("ecal_eb", "ecal_ee", "hcal_hb", "hcal_he"),
-                 segments=True, rpc=True, pt_min=10.0, match_tol=inputs.MATCH_TOL, max_hits=None):
+                 segments=True, rpc=True, pt_min=10.0, match_tol=inputs.MATCH_TOL, max_hits=None,
+                 particle="muon", e_angle=E_ANGLE, e_d0=E_D0):
+        if particle not in PARTICLES:
+            raise ValueError(f"particle must be one of {PARTICLES}, not {particle!r}")
         unknown = set(track_features) - set(inputs.TRACK_INFO_FEATURES)
         unknown |= set(hit_keys) - set(inputs.HIT_KEYS)
         if unknown:
@@ -292,9 +313,22 @@ class InputConfig:
         self.pt_min = float(pt_min)
         self.match_tol = float(match_tol)
         self.max_hits = max_hits
+        self.particle = particle
+        self.e_angle = float(e_angle)
+        self.e_d0 = float(e_d0)
 
     def to_json(self):
         return dict(vars(self))
+
+    def track_label(self, raw):
+        """Per-track label: is this track the chosen particle. raw: one event or whole split arrays."""
+        if self.particle == "muon":
+            return is_muon_track(raw, self.pt_min, self.match_tol)
+        return is_electron_track(raw, self.pt_min, self.match_tol, self.e_angle, self.e_d0)
+
+    def event_label(self, raw):
+        """Per-event label: at least one global muon / GSF electron above pt_min."""
+        return (raw["glb_pt" if self.particle == "muon" else "ele_pt"] > self.pt_min).any(-1)
 
     @property
     def node_types(self):
@@ -350,7 +384,7 @@ def event_inputs(raw, cfg, norm):
     # tracks
     pts = raw["track_points"]
     scal = track_scalars(raw["track_info"])[:, c.scalar_cols]
-    label = (raw["track_mu_dist"] < c.match_tol) & (raw["track_mu_pt"] > c.pt_min)
+    label = c.track_label(raw)
     out = {
         "track_points": norm.apply(pts, norm.track_points),
         "track_scalars": norm.apply(scal, norm.track_scalars),
@@ -385,7 +419,7 @@ def event_inputs(raw, cfg, norm):
     out["other_feats"] = np.concatenate(feats).astype(np.float32)
     out["other_type"] = np.concatenate([t for _, t, _ in nodes]).astype(np.int64)
     out["other_coord"] = np.concatenate([p for _, _, p in nodes]).astype(np.float32)
-    out["has_muon"] = np.float32((raw["glb_pt"] > c.pt_min).any())
+    out["event_label"] = np.float32(c.event_label(raw))
     return out
 
 
@@ -405,5 +439,5 @@ def pad_batch(events):
         out[key] = pad
         if mask_name:
             out[mask_name] = mask
-    out["has_muon"] = np.array([e["has_muon"] for e in events], dtype=np.float32)
+    out["event_label"] = np.array([e["event_label"] for e in events], dtype=np.float32)
     return out

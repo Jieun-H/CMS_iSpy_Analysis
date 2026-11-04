@@ -1,0 +1,29 @@
+# Train the muon label (ml/train_muon.py) on a GPU batch node. Run from the PointCloud_Agent folder:
+#   condor_submit ml/condor/train_muon.sub pack=/eos/user/j/jieun/ml/packed/zmm_ul16_v1 \
+#       runs=/eos/user/j/jieun/ml/runs name=B_conv
+#   condor_submit ml/condor/train_muon.sub pack=... runs=... name=A_conv "args=--hit-keys ecal_eb ecal_ee"
+# The electron label has its own ml/condor/train_electron.sub.
+# Each name is its own run folder <runs>/<name>; resubmitting the same name resumes from
+# last.pt. Optional: logs=<EOS folder for .out/.err>, lcg=<LCG view folder with CUDA torch>, flavour=<JobFlavour>.
+executable  = ml/condor/train.sh
+arguments   = "$ENV(PWD) $(pack) $(runs)/$(name) $(args)"
+environment = "LCG_VIEW=$(lcg) TRAIN_MODULE=ml.train_muon"
+# stdout / stderr go straight to EOS (<logs>, default /eos/user/j/jieun/ml/logs) with xrdcp,
+# so nothing is written to AFS (2 GB home quota). No condor user log is kept; use
+# condor_q / condor_history / condor_tail for the job state.
+if ! defined logs
+  logs = /eos/user/j/jieun/ml/logs
+endif
+output_destination  = root://eosuser.cern.ch/$(logs)/
+MY.XRDCP_CREATE_DIR = True
+output      = train_muon.$(name).$(ClusterId).out
+error       = train_muon.$(name).$(ClusterId).err
+request_gpus   = 1
+request_cpus   = 4
+request_memory = 16 GB
+request_disk   = 6 GB
+if ! defined flavour
+  flavour = workday
+endif
++JobFlavour = "$(flavour)"
+queue

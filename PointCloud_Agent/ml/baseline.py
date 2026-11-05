@@ -14,7 +14,7 @@ Variables (cones in eta-phi, phi wrapped; all cone sizes are options):
     n_seg       CSC + DT segments within --muon-cone of the track direction
     n_rpc       RPC hits within --muon-cone of the track direction
     ecal_e      ECAL (EB + EE) energy within --ecal-cone of the track's outer end point
-    e_over_p    ecal_e / pT (the classic electron variable)
+    e_over_p    ecal_e / p, p = pT cosh(eta) (the classic electron variable)
 
 numpy only (Python 3.9), no GPU:
     python3 -m ml.baseline --pack /eos/user/j/jieun/ml/packed/zmm_ul16_v1
@@ -73,7 +73,7 @@ def event_variables(raw, args):
     cols = {"pt": pt[keep], "abs_eta": np.abs(c["eta"][keep]),
             "chi2_ndof": c["chi2"][keep] / np.maximum(c["ndof"][keep], 1), "ndof": c["ndof"][keep],
             "iso_rel": iso / pt[keep], "n_seg": n_seg, "n_rpc": n_rpc, "ecal_e": ecal_e,
-            "e_over_p": ecal_e / pt[keep]}
+            "e_over_p": ecal_e / (pt[keep] * np.cosh(c["eta"][keep]))}
     return label, np.stack([np.broadcast_to(np.asarray(cols[v], dtype=np.float64), label.shape)
                             for v in VARIABLES], -1)
 

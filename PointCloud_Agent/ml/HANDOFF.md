@@ -333,14 +333,15 @@ python3 -m ml.evaluate --run /eos/user/j/jieun/ml/runs/B_conv --pack /eos/user/j
 
 - **라벨** (`ml/packed.py`의 `is_muon_track`, `is_electron_track`, `InputConfig.particle`):
   - 전자 = pT > `pt_min`인 GSF 전자와 안쪽 방향 각도 < `--e-angle`(rad), 안쪽 점 거리 < `--e-d0`(m), tracker muon과
-    매칭된 트랙(pT 무관)은 제외. 기본값 0.01 rad / 0.005 m는 **잠정값**.
+    매칭된 트랙(pT 무관)은 제외. 기본값 0.01 rad / 0.005 m (DYJetsToLL에서 확인해 확정, 아래 진행 상황).
   - 이벤트 단위(`--task event`): pT > `pt_min`인 GSF 전자가 1개 이상.
   - 묶음에 이미 있는 `track_e_*`, `ele_pt`로 계산 → **다시 묶을 필요 없음**. 단 `zmm_ul16_v1`처럼 전자 배열이 없는 옛 묶음은
     전자 학습 불가 (오류로 알려줌).
 - **옛 결과와 호환**: 옛 체크포인트·config는 `particle` 없음 → muon으로 읽힘. 옛 `eval_metrics.json`도 `ml.report --evals`로 읽힘.
 - `ml/evaluate.py`: 뮤온·전자 run 모두. 작동점은 그 run의 입자 효율 기준. 출력 키가 `efficiency`, `muon_pass`, `electron_pass`,
   `other_pass`로 바뀜 (이전: `muon_efficiency`, `electron_fake_rate`, `other_fake_rate`). `--e-angle/--e-d0` 기본값은 run의 값.
-- `ml/baseline.py --particle electron`: 기준선에 `e_over_p`(ECAL 에너지 / pT) 추가.
+- `ml/baseline.py --particle electron`: 기준선에 `e_over_p`(ECAL 에너지 / p, p = pT cosh η) 추가.
+  (처음엔 / pT로 잘못 계산해 전자 평균 2.91 → 2026-11-05 수정, 전자 평균 1.26)
 - `ml/report.py`: 축·표 이름이 run의 입자를 따름. 라벨 설정(입자, pt_min, match_tol, e_angle, e_d0)이 다른 run은 한 보고서에 못 넣음.
 - `ml/pack.py` summary에 `electron_tracks_pt10`(기본 잠정 기준) 추가.
 - 로컬 확인: 가짜 묶음(60 이벤트)으로 학습(트랙·이벤트, 이어 학습), evaluate, report, baseline, electron_match 실행만 확인
@@ -373,3 +374,63 @@ python3 -m ml.evaluate --run /eos/user/j/jieun/ml/runs/B_conv --pack /eos/user/j
 - `electron_match.py` 보는 법: 각도 분포에서 매칭 봉우리(작은 각도)와 나머지 사이에 빈 구간이 뚜렷한 곳에 기준을 둠.
   전자당 라벨 트랙 수가 1보다 크게 넘으면 기준이 너무 느슨함, 크게 모자라면 너무 빡빡하거나 트랙이 `tracks`에 없음.
 - check_dataset의 segment 개수 분포를 Z→μμ와 비교 (6절: 개수만 보는 지름길 확인).
+
+### 진행 상황 (2026-11-05, lxplus)
+
+**한 일**
+1. DYJetsToLL 2만 이벤트 생성 (`run_agent.py ... --nevents 20000 --nfiles 3 --per-ig 100 --no-html`, 로그
+   `/eos/user/j/jieun/dyll_train.log`) → `/eos/user/j/jieun/PointCloud_Agent_output/DYJetsToLL_UL16_train/pointcloud/Run_1`.
+2. check_dataset (`/eos/user/j/jieun/dyll_train_check.json`): npz 20,000, 오류 0, 중복 0, `has_muon` 0.307,
+   tracker muon 매칭 9459/9628 (98.2%). 이벤트당 트랙 106, CSC/DT/RPC 6.4/2.1/7.6, ECAL EB/EE 32/128, HCAL HE 10.4, HF 215.
+3. 묶기 `/eos/user/j/jieun/ml/packed/dyll_ul16_v1` (condor 12170153, 70/15/15, seed 0):
+   | split | 이벤트 | 트랙 | 뮤온 라벨 | 전자 라벨 |
+   |---|---|---|---|---|
+   | train | 14,000 | 1,488,577 | 6,681 | 7,203 |
+   | val | 3,000 | 315,570 | 1,400 | 1,454 |
+   | test | 3,000 | 318,804 | 1,379 | 1,603 |
+4. 전자 기준 (`electron_match`, train, `/eos/user/j/jieun/ml/ematch_0.01.json`, `ematch_0.003.json`):
+   각도 봉우리 < 0.0032 rad (5,607), 꼬리 0.0032–0.01 (465, 대부분 d0 < 1 mm → 진짜 전자), 0.03–0.3 골짜기, > 0.32 무관한 트랙.
+   0.01 → 전자당 라벨 0.966 (7,203 / 7,458), 0.003 → 0.834 (너무 빡빡). d0는 뚜렷한 골짜기 없음, 1 mm 넘는 것 3.5%.
+   **기본값 0.01 rad / 0.005 m로 확정** → 이후 명령에 `--e-angle/--e-d0` 불필요.
+   - 각도 0인 659개와 1e-5–3e-4 빈 구간은 float32 arccos 정밀도(약 3.5e-4 rad) 때문 (`packed.py` `match_electrons`). 기준에는 영향 없음.
+   - 라벨 트랙 중 1,203개는 CTF 트랙 pT ≤ 10 (brem). 라벨은 GSF 전자 pT 기준.
+5. 뮤온 모델 일반화: `B_conv` → dyll test (`--ref-pack zmm_ul16_v1`, 결과 `/eos/user/j/jieun/ml/runs/B_conv/eval/dyll_ul16_v1_test`).
+   auc_pt 0.9966, ap_pt 0.9957. 작동점은 Z→μμ val (cut 0.9981 / 0.9934 / 0.884).
+   | | 90% | 95% | 99% |
+   |---|---|---|---|
+   | mumu 뮤온 효율 (908) | 0.887 | 0.939 | 0.990 |
+   | 전체 뮤온 효율 (1379) | 0.863 | 0.922 | 0.979 |
+   | emu 뮤온 효율 (77) | 0.779 | 0.857 | 0.909 |
+   | other 범주 뮤온 효율 (391) | 0.831 | 0.903 | 0.972 |
+   | 전자 오판 (1356) | 0 | 0 | 0.0037 |
+   | 기타 오판 (1828) | 0.0011 | 0.0022 | 0.0093 |
+   → Z 같은 이벤트에서는 작동점이 그대로 통함. 전자를 따로 안 배웠는데도 전자 오판 거의 없음.
+   약점: other/emu 범주(제트 속·τ에서 온 덜 고립된 뮤온 추정) 효율 5–10% 낮음 → 보고서 `vs_pt`로 확인할 것.
+6. 기준선 (dyll test, `/eos/user/j/jieun/ml/baseline_dyll_{muon,electron}_test.json`):
+   - 뮤온: 최고 `n_seg` AUC 0.995 / AP 0.983 (B_conv 0.9966 / 0.9957 → AP 기준 섞임 1.7% → 0.4%). `n_rpc` 0.898, `ecal_e` 0.873.
+   - 전자 (`e_over_p` 수정 후): 최고 `ecal_e` AUC 0.906 / AP 0.689, `e_over_p` 0.895 / 0.619 (전자 평균 1.26),
+     `n_seg` 0.722, `chi2_ndof` 0.613. 무작위 AP 0.297. → 전자는 뮤온보다 훨씬 어려움, 전자 모델이 넘어야 할 기준.
+7. 전자 학습 제출 (lxplus905에서, `pos_weight` 기본 1 = B_conv와 같음):
+   - `E_B_conv` 12171024 (모든 입력)
+   - `E_nocalo` 12171025 (`--hit-keys`: 칼로리미터 없음, ECAL 누출 대조군)
+   - 로그 `/eos/user/j/jieun/ml/logs/train_electron.<name>.<번호>.{out,err}`, run `/eos/user/j/jieun/ml/runs/<name>`.
+   - 두 작업 모두 완료 (ExitCode 0, A100, 30 epoch, E_B_conv 824 s / E_nocalo 720 s). 학습 로그는 `.out`(`.err`는 비어 있음).
+     | run | test auc_pt | test ap_pt | best epoch | 비고 |
+     |---|---|---|---|---|
+     | 기준선 `ecal_e` | 0.906 | 0.689 | | |
+     | `E_nocalo` | 0.9298 | 0.8501 | 29 | 끝까지 조금씩 오름 |
+     | `E_B_conv` | 0.9837 | 0.9648 | 24 | 20 epoch 이후 평탄 |
+     → 칼로리미터 없이도 기준선보다 좋음 (트랙 품질·모양, 뮤온 검출기 없음, 고립도). 칼로리미터를 넣으면 AP 0.85 → 0.96.
+     이 차이 중 얼마가 진짜 샤워 정보이고 얼마가 reducedEcalRecHits 선택(누출)인지는 아직 구분 못 함.
+
+**다음**
+1. ~~두 학습 확인~~ 완료 (위 표).
+2. 전자 모델 평가 (lxplus-gpu, LCG view, 작동점은 run 자신의 val = dyll val이라 `--ref-pack` 불필요):
+   ```bash
+   bash -c 'source /cvmfs/sft.cern.ch/lcg/views/LCG_107_cuda/x86_64-el9-gcc11-opt/setup.sh && \
+     python3 -m ml.evaluate --run /eos/user/j/jieun/ml/runs/E_B_conv --pack /eos/user/j/jieun/ml/packed/dyll_ul16_v1 --split test'
+   # E_nocalo도 같은 방식
+   ```
+   기준: `ecal_e` AUC 0.906 / AP 0.689를 넘는지, E_B_conv와 E_nocalo의 차이(= ECAL 의존도), 뮤온 오판(muon pass).
+3. 보고서: 뮤온(B_conv의 dyll 결과)과 전자 run을 따로 (`ml.report`, 라벨 설정이 다르면 한 보고서에 못 넣음).
+4. 나중: `--first-file 3`으로 통계 늘리기, eμ 샘플, ParT.
